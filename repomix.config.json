@@ -1,0 +1,14 @@
+﻿{
+  "ignore": {
+    "custom": [
+      "src/data/us_counties.json",
+      "repomix-output.*",
+      "node_modules/**",
+      "dist/**",
+      "build/**",
+      "*.log",
+      ".git/**",
+      "*.map"
+    ]
+  }
+}

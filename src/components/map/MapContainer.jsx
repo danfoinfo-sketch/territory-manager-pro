@@ -4,9 +4,66 @@ import { Loader2 } from "lucide-react";
 import LeafletDrawControl from "./LeafletDrawControl";
 import { fetchCountyPopulation, getCountyName } from "./censusApi";
 import L from "leaflet";
+import usStatesGeoJSON from "../../data/us_states.json";
 
 const US_CENTER = [39.8283, -98.5795];
 const US_ZOOM = 4;
+
+const fipsToState = {
+  "01": "Alabama",
+  "02": "Alaska",
+  "04": "Arizona",
+  "05": "Arkansas",
+  "06": "California",
+  "08": "Colorado",
+  "09": "Connecticut",
+  "10": "Delaware",
+  "11": "District of Columbia",
+  "12": "Florida",
+  "13": "Georgia",
+  "15": "Hawaii",
+  "16": "Idaho",
+  "17": "Illinois",
+  "18": "Indiana",
+  "19": "Iowa",
+  "20": "Kansas",
+  "21": "Kentucky",
+  "22": "Louisiana",
+  "23": "Maine",
+  "24": "Maryland",
+  "25": "Massachusetts",
+  "26": "Michigan",
+  "27": "Minnesota",
+  "28": "Mississippi",
+  "29": "Missouri",
+  "30": "Montana",
+  "31": "Nebraska",
+  "32": "Nevada",
+  "33": "New Hampshire",
+  "34": "New Jersey",
+  "35": "New Mexico",
+  "36": "New York",
+  "37": "North Carolina",
+  "38": "North Dakota",
+  "39": "Ohio",
+  "40": "Oklahoma",
+  "41": "Oregon",
+  "42": "Pennsylvania",
+  "44": "Rhode Island",
+  "45": "South Carolina",
+  "46": "South Dakota",
+  "47": "Tennessee",
+  "48": "Texas",
+  "49": "Utah",
+  "50": "Vermont",
+  "51": "Virginia",
+  "53": "Washington",
+  "54": "West Virginia",
+  "55": "Wisconsin",
+  "56": "Wyoming",
+  "72": "Puerto Rico",
+  "78": "Virgin Islands",
+};
 
 function MapEventHandler({ onMapClick, drawingMode }) {
   useMapEvents({
@@ -20,7 +77,7 @@ function MapEventHandler({ onMapClick, drawingMode }) {
 function FitBoundsComponent({ bounds }) {
   const map = useMap();
   useEffect(() => {
-    if (bounds) map.fitBounds(bounds, { padding: [20, 20] });
+    if (bounds) map.fitBounds(bounds, { padding: [50, 50] });
   }, [bounds, map]);
   return null;
 }
@@ -67,6 +124,12 @@ export default function MapContainerComponent({
   addModeTerritoryId,
   addCountyToActiveTerritory,
   countyBoundaries,
+  selectedTerritoryId,
+  setSelectedTerritoryId,
+  clearTooltip,
+  setClearPopup,
+  selectedTerritory,
+  selectedLocation,
 }) {
   const mapRef = useRef();
   const wrapperRef = useRef();
@@ -78,12 +141,127 @@ export default function MapContainerComponent({
 
   const [popupInfo, setPopupInfo] = useState(null);
 
+  // Forward setter
+  useEffect(() => {
+    if (setClearPopup) {
+      setClearPopup(() => setPopupInfo);
+    }
+  }, [setClearPopup]);
+
+  // Center on selected territory
+  useEffect(() => {
+    if (!selectedTerritory || !mapRef.current) return;
+
+    const map = mapRef.current;
+    const bounds = L.latLngBounds([]);
+
+    selectedTerritory.counties.forEach((c) => {
+      const fips = c.fips;
+      const feature = countyBoundaries.features.find(
+        (f) => f.properties.GEOID === fips
+      );
+      if (feature && feature.geometry) {
+        const geoJsonLayer = L.geoJSON(feature);
+        bounds.extend(geoJsonLayer.getBounds());
+      }
+    });
+
+    if (bounds.isValid()) {
+      map.fitBounds(bounds, { padding: [60, 60], maxZoom: 10 });
+    }
+  }, [selectedTerritory, countyBoundaries]);
+
+  // Center on searched location
+  useEffect(() => {
+    if (!selectedLocation || !mapRef.current) return;
+
+    const map = mapRef.current;
+
+    console.log("[Search] Centering on:", selectedLocation);
+
+    if (selectedLocation.bounds) {
+      const [minLat, maxLat, minLon, maxLon] = selectedLocation.bounds;
+      const bounds = L.latLngBounds(
+        [minLat, minLon],
+        [maxLat, maxLon]
+      );
+      map.fitBounds(bounds, { padding: [80, 80], maxZoom: 14 });
+      return;
+    }
+
+    if (selectedLocation.lat && selectedLocation.lon) {
+      map.flyTo([selectedLocation.lat, selectedLocation.lon], 12, { duration: 1.2 });
+      return;
+    }
+
+    // Local fallback (state or county name)
+    const query = (selectedLocation.display_name || selectedLocation).toLowerCase().trim();
+
+    // State-only (no comma)
+    if (!query.includes(", ")) {
+      const stateFips = Object.keys(fipsToState).find(code => fipsToState[code].toLowerCase() === query);
+      if (stateFips) {
+        const stateBounds = L.latLngBounds([]);
+        countyBoundaries.features.forEach(f => {
+          if (f.properties.STATEFP === stateFips && f.geometry) {
+            stateBounds.extend(L.geoJSON(f).getBounds());
+          }
+        });
+        if (stateBounds.isValid()) {
+          map.fitBounds(stateBounds, { padding: [80, 80], maxZoom: 8 });
+          console.log("[Search] Zoomed to state:", fipsToState[stateFips]);
+          return;
+        }
+      }
+    }
+
+    // County or county,state
+    const parts = query.split(", ").map(p => p.trim());
+    const countyQuery = parts[0];
+    const stateQuery = parts[1] || "";
+
+    let targetBounds = null;
+
+    if (stateQuery) {
+      const stateFips = Object.keys(fipsToState).find(code => fipsToState[code].toLowerCase() === stateQuery.toLowerCase());
+      if (stateFips) {
+        const countyFeature = countyBoundaries.features.find(f => {
+          const name = (f.properties.NAME || f.properties.NAMELSAD || "").toLowerCase().trim();
+          return name === countyQuery.toLowerCase() && f.properties.STATEFP === stateFips;
+        });
+
+        if (countyFeature && countyFeature.geometry) {
+          targetBounds = L.geoJSON(countyFeature).getBounds();
+        }
+      }
+    }
+
+    if (!targetBounds) {
+      const countyFeature = countyBoundaries.features.find(f => {
+        const name = (f.properties.NAME || f.properties.NAMELSAD || "").toLowerCase().trim();
+        return name === query.toLowerCase();
+      });
+
+      if (countyFeature && countyFeature.geometry) {
+        targetBounds = L.geoJSON(countyFeature).getBounds();
+      }
+    }
+
+    if (targetBounds && targetBounds.isValid()) {
+      map.fitBounds(targetBounds, { padding: [80, 80], maxZoom: 12 });
+    } else {
+      console.log("[Search] No match found for:", query);
+    }
+  }, [selectedLocation, countyBoundaries]);
+
   console.log("MapContainer received props:", {
     territoriesLength: territories.length,
     activeTerritoryId,
     addModeTerritoryId,
     addCountyFunctionExists: !!addCountyToActiveTerritory,
     countyBoundariesFeatures: countyBoundaries?.features?.length || "missing",
+    selectedTerritoryId,
+    selectedLocation,
   });
 
   useEffect(() => {
@@ -138,8 +316,7 @@ export default function MapContainerComponent({
     return () => mutationObserver.disconnect();
   }, []);
 
-  // County click handler - add/remove from territory in add mode
-  const handleCountyClick = async (feature, layer) => {
+  const handleCountyClick = async (feature, layer, e) => {
     console.log("=== COUNTY CLICK DETECTED ===");
     console.log("Feature properties:", feature.properties);
     console.log("Active territory ID (prop):", activeTerritoryId);
@@ -148,8 +325,22 @@ export default function MapContainerComponent({
 
     const props = feature.properties || {};
     let fips = props.GEOID || (props.STATEFP + props.COUNTYFP) || props.FIPS || props.statefp + props.countyfp || props.countyfp;
+
+    let owningTerritory = null;
+    for (const t of territories) {
+      if (t.counties.some((c) => c.fips === fips)) {
+        owningTerritory = t;
+        break;
+      }
+    }
+
+    if (owningTerritory && !addModeTerritoryId) {
+      setSelectedTerritoryId(owningTerritory.id);
+      setPopupInfo(null);
+      return;
+    }
+
     if (!fips || fips.length < 5) {
-      console.log("No valid FIPS found - properties:", props);
       const name = props.NAME || props.name || "Unknown County";
       setPopupInfo({ name, population: null });
       return;
@@ -158,31 +349,24 @@ export default function MapContainerComponent({
     const stateFips = fips.slice(0, 2);
     const countyFips = fips.slice(2);
 
-    console.log("Fetching population for state:", stateFips, "county:", countyFips);
-
     const name = await getCountyName(stateFips, countyFips) || props.NAME || "Unknown County";
     const population = await fetchCountyPopulation(stateFips, countyFips);
 
-    console.log("Population fetched:", population);
-
     if (addModeTerritoryId) {
-      console.log("Mode active - calling addCountyToActiveTerritory");
       addCountyToActiveTerritory(fips, population, name);
     } else {
-      console.log("No add mode active - skipping add");
+      // Single-county popup - no state line
+      setPopupInfo({
+        lat: layer.getBounds().getCenter().lat,
+        lng: layer.getBounds().getCenter().lng,
+        name,
+        population,
+      });
     }
-
-    setPopupInfo({
-      lat: layer.getBounds().getCenter().lat,
-      lng: layer.getBounds().getCenter().lng,
-      name,
-      population,
-      state: props.STATE_NAME || props.state || "Unknown",
-    });
   };
 
   return (
-    <div ref={wrapperRef} style={{ height: "100vh", width: "100vw", position: "relative" }}>
+    <div ref={wrapperRef} style={{ height: "100%", width: "100%" }}>
       <LeafletMap
         ref={mapRef}
         center={US_CENTER}
@@ -212,36 +396,63 @@ export default function MapContainerComponent({
         <DataChangeInvalidator savedZones={territories} />
         <MapEventHandler onMapClick={null} drawingMode={false} />
 
-        {/* County boundaries - clickable */}
+        {/* State borders */}
+        <GeoJSON
+          data={usStatesGeoJSON}
+          style={{
+            color: "#2c3e50",
+            weight: 2.5,
+            opacity: 0.9,
+            fill: false,
+          }}
+        />
+
+        {/* County boundaries */}
         {countyBoundaries?.features && (
           <GeoJSON
-            key={`counties-${territories.length}-${addModeTerritoryId}`}  // force re-render when territories or mode change
+            key={`counties-${territories.length}-${addModeTerritoryId}`}
             data={countyBoundaries}
             style={(feature) => {
-              const territory = territories.find((t) => t.id === addModeTerritoryId);
-              const isInTerritory = territory && territory.counties.some((c) => c.fips === feature.properties.GEOID);
+              let territoryColor = "#8a9bb1";
+              let weight = 1.2;
+              let fillOpacity = 0.4;
+              let fillColor = "#e2e8f0";
+
+              for (const territory of territories) {
+                if (territory.counties.some((c) => c.fips === feature.properties.GEOID)) {
+                  territoryColor = territory.color;
+                  fillColor = territory.color;
+                  fillOpacity = 0.5;
+                  weight = 2;
+
+                  if (territory.id === activeTerritoryId) {
+                    weight = 4;
+                    fillOpacity = 0.7;
+                  }
+                  break;
+                }
+              }
+
               return {
-                color: isInTerritory ? territory.color : "#64748b",
-                weight: isInTerritory ? 3 : 1.5,
-                fillColor: isInTerritory ? territory.color : "#e2e8f0",
-                fillOpacity: isInTerritory ? 0.7 : 0.4,
+                color: territoryColor,
+                weight,
+                fillColor,
+                fillOpacity,
                 pointerEvents: "visiblePainted",
                 interactive: true,
               };
             }}
             onEachFeature={(feature, layer) => {
-              console.log("Adding click handler to county:", feature.properties);
               layer.bindTooltip(feature.properties.NAME || "County", { permanent: false, direction: "center", className: "county-tooltip" });
               layer.on({
                 click: (e) => {
-                  console.log("Click event fired on county:", feature.properties);
-                  handleCountyClick(feature, layer);
+                  handleCountyClick(feature, layer, e);
                 },
                 mouseover: (e) => {
                   e.target.setStyle({ weight: 3, color: "#ff7800", fillOpacity: 0.6 });
                 },
                 mouseout: (e) => {
-                  e.target.setStyle({ weight: 1.5, color: "#64748b", fillOpacity: 0.4 });
+                  e.target.setStyle({ weight: 1.2, color: "#8a9bb1", fillOpacity: 0.4 });
                 }
               });
             }}
@@ -274,12 +485,11 @@ export default function MapContainerComponent({
           );
         })}
 
-        {/* Popup */}
+        {/* Popup - no state line */}
         {popupInfo && (
           <Popup position={[popupInfo.lat, popupInfo.lng]} onClose={() => setPopupInfo(null)}>
             <div className="min-w-[200px]">
               <h3 className="font-semibold text-sm text-gray-900">{popupInfo.name}</h3>
-              <p className="text-xs text-gray-500">{popupInfo.state}</p>
               {popupInfo.population !== null ? (
                 <div className="mt-2">
                   <p className="text-xs text-gray-500">Population (2023 est.)</p>
