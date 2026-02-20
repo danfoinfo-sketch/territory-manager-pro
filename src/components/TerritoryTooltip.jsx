@@ -1,13 +1,20 @@
 import React, { useState, useRef, useEffect } from "react";
 
 export default function TerritoryTooltip({ territory, onClose }) {
-  const [position, setPosition] = useState({ x: 20, y: 100 }); // initial position
+  const [position, setPosition] = useState({ x: 20, y: 100 });
   const [isDragging, setIsDragging] = useState(false);
-  const dragRef = useRef(null);
   const startPos = useRef({ x: 0, y: 0 });
 
-  // Use the territory's color for the header (fallback to pink if missing)
-  const headerColor = territory?.color || "#ec4899"; // default pink
+  const headerColor = territory?.color || "#ec4899";
+
+  // Sum stand-alone houses with debug
+  const totalHouses = territory?.counties?.reduce((sum, c) => {
+    const houses = c.standAloneHouses || 0;
+    console.log(`County ${c.name || c.fips}: ${houses} houses`); // debug in console
+    return sum + houses;
+  }, 0) || 0;
+
+  console.log("Total stand-alone houses for territory:", totalHouses); // debug
 
   const handleMouseDown = (e) => {
     if (e.target.closest(".drag-handle")) {
@@ -16,7 +23,7 @@ export default function TerritoryTooltip({ territory, onClose }) {
         x: e.clientX - position.x,
         y: e.clientY - position.y,
       };
-      e.preventDefault(); // prevent text selection
+      e.preventDefault();
     }
   };
 
@@ -65,12 +72,11 @@ export default function TerritoryTooltip({ territory, onClose }) {
         userSelect: "none",
       }}
     >
-      {/* Draggable header with territory color */}
       <div
         className="drag-handle"
         onMouseDown={handleMouseDown}
         style={{
-          background: headerColor, // ← uses territory.color
+          background: headerColor,
           color: "white",
           padding: "12px 16px",
           fontWeight: "600",
@@ -96,10 +102,12 @@ export default function TerritoryTooltip({ territory, onClose }) {
         </button>
       </div>
 
-      {/* Content */}
       <div style={{ padding: "16px" }}>
         <p style={{ margin: "0 0 12px", fontWeight: "600" }}>
           Total Population: {territory.population.toLocaleString()}
+        </p>
+        <p style={{ margin: "0 0 12px", fontWeight: "600" }}>
+          Stand-alone Houses: {totalHouses > 0 ? totalHouses.toLocaleString() : "0 (data loading or missing)"}
         </p>
         <p style={{ margin: "0 0 8px", fontWeight: "500" }}>
           Counties ({territory.counties.length}):

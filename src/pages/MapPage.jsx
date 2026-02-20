@@ -3,6 +3,7 @@ import MapContainerComponent from "../components/map/MapContainer";
 import countyBoundaries from "../data/us_counties.json";
 import TerritoryTooltip from "../components/TerritoryTooltip";
 import { Search } from "lucide-react";
+import { fetchStandAloneHouses } from "../components/map/censusApi";
 
 console.log("County data loaded:", countyBoundaries?.features?.length || 0, "counties");
 
@@ -100,7 +101,7 @@ function MapPage() {
     return Array.from(placeSet).sort();
   }, []);
 
-  // Fetch suggestions from Nominatim + local data
+  // Fetch suggestions using Mapbox (fast, city/zip-first)
   useEffect(() => {
     if (!searchQuery.trim()) {
       setSuggestions([]);
@@ -113,7 +114,7 @@ function MapPage() {
     const timer = setTimeout(async () => {
       try {
         const response = await fetch(
-          `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(query)}&format=json&limit=6&countrycodes=us`
+          `https://api.mapbox.com/geocoding/v5/mapbox.places/${encodeURIComponent(query)}.json?access_token=${import.meta.env.VITE_MAPBOX_TOKEN}&country=us&limit=6&types=place,locality,postcode,region,neighborhood&language=en`
         );
         const data = await response.json();
 
@@ -121,17 +122,27 @@ function MapPage() {
           .filter(p => p.toLowerCase() === query.toLowerCase())
           .map(name => ({ display_name: name, lat: null, lon: null, isLocal: true, isState: true }));
 
+        const mapboxResults = data.features.map(f => ({
+          display_name: f.place_name,
+          lat: f.center[1],
+          lon: f.center[0],
+          isLocal: false,
+          isState: f.place_type.includes("region"),
+          isZip: f.place_type.includes("postcode"),
+          isCity: f.place_type.includes("place") || f.place_type.includes("locality")
+        }));
+
         const combined = [
           ...localStateMatches,
-          ...data.map(item => ({ ...item, isLocal: false })),
+          ...mapboxResults,
           ...localPlaces
             .filter(p => p.toLowerCase().includes(query.toLowerCase()) && !localStateMatches.some(s => s.display_name === p))
-            .map(name => ({ display_name: name, lat: null, lon: null, isLocal: true, isState: false }))
+            .map(name => ({ display_name: name, lat: null, lon: null, isLocal: true, isState: name.split(", ").length === 1 }))
         ].slice(0, 8);
 
         setSuggestions(combined);
         setSelectedSuggestionIndex(-1);
-        console.log("[Suggestions] Combined count:", combined.length);
+        console.log("[Suggestions] Combined count:", combined.length, "Mapbox results:", mapboxResults.length);
       } catch (error) {
         console.log("[Search Error]", error);
         const localFiltered = localPlaces
@@ -141,47 +152,75 @@ function MapPage() {
         setSuggestions(localFiltered);
         setSelectedSuggestionIndex(-1);
       }
-    }, 300);
+    }, 100); // fast debounce
 
     return () => clearTimeout(timer);
   }, [searchQuery, localPlaces]);
 
-  // Keyboard navigation (global listener for arrows + ESC)
+  // Keyboard navigation with fast state/city priority on Enter
   useEffect(() => {
     const handleKeyDown = (e) => {
-      if (suggestions.length === 0) return;
-
       if (e.key === "ArrowDown") {
         e.preventDefault();
-        setSelectedSuggestionIndex(prev => 
-          prev < suggestions.length - 1 ? prev + 1 : prev
-        );
+        if (suggestions.length > 0) {
+          setSelectedSuggestionIndex(prev => prev < suggestions.length - 1 ? prev + 1 : prev);
+        }
       } else if (e.key === "ArrowUp") {
         e.preventDefault();
-        setSelectedSuggestionIndex(prev => 
-          prev > 0 ? prev - 1 : prev
-        );
+        if (suggestions.length > 0) {
+          setSelectedSuggestionIndex(prev => prev > 0 ? prev - 1 : prev);
+        }
       } else if (e.key === "Enter") {
         e.preventDefault();
-        if (selectedSuggestionIndex >= 0) {
-          handleSelectPlace(suggestions[selectedSuggestionIndex]);
-        } else if (suggestions.length > 0) {
-          handleSelectPlace(suggestions[0]);
+
+        const queryLower = searchQuery.trim().toLowerCase();
+
+        // Priority 1: Exact state match (instant)
+        const exactState = localPlaces.find(p => p.toLowerCase() === queryLower);
+        if (exactState) {
+          const stateSuggestion = { display_name: exactState, lat: null, lon: null, isLocal: true, isState: true };
+          handleSelectPlace(stateSuggestion);
+          return;
+        }
+
+        // Priority 2: City-like query (short wait if needed)
+        const looksLikeCity = queryLower.includes(",") || queryLower.length > 4;
+
+        if (looksLikeCity) {
+          if (suggestions.length > 0) {
+            // Prefer first non-state result (city usually first)
+            const citySuggestion = suggestions.find(s => !s.isState) || suggestions[0];
+            handleSelectPlace(citySuggestion);
+            return;
+          } else {
+            // Short wait (max 300ms) for city suggestions
+            const shortTimer = setTimeout(() => {
+              if (suggestions.length > 0) {
+                const citySuggestion = suggestions.find(s => !s.isState) || suggestions[0];
+                handleSelectPlace(citySuggestion);
+              }
+            }, 300);
+            return () => clearTimeout(shortTimer);
+          }
+        }
+
+        // Fallback: highlighted or first suggestion
+        if (suggestions.length > 0) {
+          const selected = suggestions[selectedSuggestionIndex >= 0 ? selectedSuggestionIndex : 0];
+          handleSelectPlace(selected);
         }
       } else if (e.key === "Escape") {
         e.preventDefault();
         setSuggestions([]);
         setSelectedSuggestionIndex(-1);
-        // Optionally clear input too
-        // setSearchQuery("");
       }
     };
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [suggestions, selectedSuggestionIndex]);
+  }, [suggestions, selectedSuggestionIndex, searchQuery, localPlaces]);
 
-  // Scroll highlighted item into view
+  // Scroll highlighted suggestion into view
   useEffect(() => {
     if (selectedSuggestionIndex >= 0 && suggestionsRef.current) {
       const selectedItem = suggestionsRef.current.children[selectedSuggestionIndex];
@@ -200,11 +239,7 @@ function MapPage() {
   };
 
   const handleSearchKeyDown = (e) => {
-    // Only handle Enter here for input-specific behavior
-    if (e.key === "Enter" && suggestions.length > 0) {
-      e.preventDefault();
-      handleSelectPlace(suggestions[selectedSuggestionIndex >= 0 ? selectedSuggestionIndex : 0]);
-    }
+    // Enter handled in global listener
   };
 
   const createNewTerritory = () => {
@@ -214,6 +249,7 @@ function MapPage() {
       name,
       color: TERRITORY_COLORS[territories.length % TERRITORY_COLORS.length],
       population: 0,
+      standAloneHouses: 0,
       counties: [],
     };
     setTerritories(prev => [...prev, newTerritory]);
@@ -241,8 +277,14 @@ function MapPage() {
     setAddModeTerritoryId(prev => (prev === id ? null : id));
   };
 
-  const addCountyToActiveTerritory = (fips, population, countyName) => {
+  const addCountyToActiveTerritory = async (fips, population, countyName) => {
     if (!addModeTerritoryId) return;
+
+    const stateFips = fips.slice(0, 2);
+    const countyFips = fips.slice(2);
+
+    const standAloneHouses = await fetchStandAloneHouses(stateFips, countyFips);
+    console.log(`[addCounty] Fetched ${standAloneHouses} stand-alone houses for ${countyName} (FIPS: ${fips})`);
 
     setTerritories(prev =>
       prev.map(territory => {
@@ -252,11 +294,20 @@ function MapPage() {
         if (existing) {
           const newCounties = territory.counties.filter(c => c.fips !== fips);
           const newPop = territory.population - population;
-          return { ...territory, counties: newCounties, population: newPop };
+          const newHouses = (territory.standAloneHouses || 0) - (existing.standAloneHouses || 0);
+          console.log(`[addCounty] Removed ${countyName}: houses subtracted = ${existing.standAloneHouses || 0}, new total houses = ${newHouses}`);
+          return { ...territory, counties: newCounties, population: newPop, standAloneHouses: newHouses };
         } else {
-          const newCounties = [...territory.counties, { fips, pop: population, name: countyName }];
+          const newCounties = [...territory.counties, { 
+            fips, 
+            pop: population, 
+            name: countyName, 
+            standAloneHouses 
+          }];
           const newPop = territory.population + population;
-          return { ...territory, counties: newCounties, population: newPop };
+          const newHouses = (territory.standAloneHouses || 0) + standAloneHouses;
+          console.log(`[addCounty] Added ${countyName}: houses added = ${standAloneHouses}, new total houses = ${newHouses}`);
+          return { ...territory, counties: newCounties, population: newPop, standAloneHouses: newHouses };
         }
       })
     );
