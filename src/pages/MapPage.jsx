@@ -5,7 +5,7 @@ import TerritoryTooltip from "../components/TerritoryTooltip";
 import { Search } from "lucide-react";
 
 console.log("County data loaded:", countyBoundaries?.features?.length || 0, "counties");
-console.log("BASE44 REBUILD TEST - latest code from repo");
+console.log("BASE44 REBUILD TEST - latest code from repo"); // Force rebuild - latest code
 
 const TERRITORY_COLORS = [
   "#6366f1", "#ec4899", "#14b8a6", "#f59e0b", "#8b5cf6",
