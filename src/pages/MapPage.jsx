@@ -2,8 +2,8 @@ import React, { useState, useMemo, useEffect, useRef } from "react";
 import MapContainerComponent from "../components/map/MapContainer";
 import countyBoundaries from "../data/us_counties.json";
 import TerritoryTooltip from "../components/TerritoryTooltip";
-import { Search } from "lucide-react";  // Fixed: imported correctly
-import { fetchStandAloneHouses } from "../components/map/censusApi";
+import { Search } from "lucide-react";
+import { fetchStandAloneHouses, fetchZipPopulationAndHouses } from "../components/map/censusApi";
 
 console.log("County data loaded:", countyBoundaries?.features?.length || 0, "counties");
 
@@ -73,20 +73,22 @@ function MapPage() {
   const [territoryCounter, setTerritoryCounter] = useState(1);
   const [activeTerritoryId, setActiveTerritoryId] = useState(null);
   const [addModeTerritoryId, setAddModeTerritoryId] = useState(null);
-
   const [selectedTerritoryId, setSelectedTerritoryId] = useState(null);
 
-  // Search
   const [searchQuery, setSearchQuery] = useState("");
   const [suggestions, setSuggestions] = useState([]);
   const [selectedSuggestionIndex, setSelectedSuggestionIndex] = useState(-1);
   const [selectedLocation, setSelectedLocation] = useState(null);
 
   const [clearPopup, setClearPopup] = useState(null);
-
   const suggestionsRef = useRef(null);
 
-  // Local county/state places
+  const [boundaryMode, setBoundaryMode] = useState("counties");
+
+  useEffect(() => {
+    console.log("[MapPage STATE] addModeTerritoryId changed to:", addModeTerritoryId);
+  }, [addModeTerritoryId]);
+
   const localPlaces = useMemo(() => {
     const placeSet = new Set();
     (countyBoundaries?.features || []).forEach(feature => {
@@ -101,7 +103,6 @@ function MapPage() {
     return Array.from(placeSet).sort();
   }, []);
 
-  // Fetch suggestions using Mapbox
   useEffect(() => {
     if (!searchQuery.trim()) {
       setSuggestions([]);
@@ -141,7 +142,6 @@ function MapPage() {
     return () => clearTimeout(timer);
   }, [searchQuery]);
 
-  // Keyboard navigation
   useEffect(() => {
     const handleKeyDown = (e) => {
       if (e.key === "ArrowDown") {
@@ -159,14 +159,12 @@ function MapPage() {
 
         const queryLower = searchQuery.trim().toLowerCase();
 
-        // Priority 1: Exact state match
         const exactState = localPlaces.find(p => p.toLowerCase() === queryLower);
         if (exactState) {
           handleSelectPlace({ display_name: exactState, lat: null, lon: null, isLocal: true, isState: true });
           return;
         }
 
-        // Priority 2: Prefer city/zip from Mapbox
         if (suggestions.length > 0) {
           const preferred = suggestions.find(s => s.isCity || s.isZip) || suggestions[0];
           handleSelectPlace(preferred);
@@ -183,7 +181,6 @@ function MapPage() {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [suggestions, searchQuery, localPlaces]);
 
-  // Scroll highlighted suggestion
   useEffect(() => {
     if (selectedSuggestionIndex >= 0 && suggestionsRef.current) {
       const item = suggestionsRef.current.children[selectedSuggestionIndex];
@@ -199,10 +196,6 @@ function MapPage() {
     setSelectedSuggestionIndex(-1);
   };
 
-  const handleSearchKeyDown = (e) => {
-    // This is now used correctly on the input onKeyDown
-  };
-
   const createNewTerritory = () => {
     const name = `Territory ${territoryCounter}`;
     const newTerritory = {
@@ -212,6 +205,7 @@ function MapPage() {
       population: 0,
       standAloneHouses: 0,
       counties: [],
+      zips: [],
     };
     setTerritories(prev => [...prev, newTerritory]);
     setActiveTerritoryId(newTerritory.id);
@@ -245,33 +239,51 @@ function MapPage() {
     const countyFips = fips.slice(2);
 
     const standAloneHouses = await fetchStandAloneHouses(stateFips, countyFips);
-    console.log(`[addCounty] Fetched ${standAloneHouses} stand-alone houses for ${countyName} (FIPS: ${fips})`);
 
-    setTerritories(prev =>
-      prev.map(territory => {
-        if (territory.id !== addModeTerritoryId) return territory;
+    setTerritories(prev => {
+      const newTerritories = [...prev];
+      const index = newTerritories.findIndex(t => t.id === addModeTerritoryId);
+      if (index === -1) return prev;
 
-        const existing = territory.counties.find(c => c.fips === fips);
-        if (existing) {
-          const newCounties = territory.counties.filter(c => c.fips !== fips);
-          const newPop = territory.population - population;
-          const newHouses = (territory.standAloneHouses || 0) - (existing.standAloneHouses || 0);
-          console.log(`Removed ${countyName}: houses subtracted = ${existing.standAloneHouses || 0}`);
-          return { ...territory, counties: newCounties, population: newPop, standAloneHouses: newHouses };
-        } else {
-          const newCounties = [...territory.counties, { 
-            fips, 
-            pop: population, 
-            name: countyName, 
-            standAloneHouses 
-          }];
-          const newPop = territory.population + population;
-          const newHouses = (territory.standAloneHouses || 0) + standAloneHouses;
-          console.log(`Added ${countyName}: houses added = ${standAloneHouses}`);
-          return { ...territory, counties: newCounties, population: newPop, standAloneHouses: newHouses };
-        }
-      })
-    );
+      const territory = { ...newTerritories[index] };
+      const existingIndex = territory.counties.findIndex(c => c.fips === fips);
+      if (existingIndex !== -1) {
+        territory.counties = territory.counties.filter((_, i) => i !== existingIndex);
+        territory.population -= population;
+        territory.standAloneHouses -= (territory.counties[existingIndex].standAloneHouses || 0);
+      } else {
+        territory.counties = [...territory.counties, { fips, pop: population, name: countyName, standAloneHouses }];
+        territory.population += population;
+        territory.standAloneHouses += standAloneHouses;
+      }
+      newTerritories[index] = territory;
+      return newTerritories;
+    });
+  };
+
+  const addZipToActiveTerritory = async (zip, population, standAloneHouses) => {
+    if (!addModeTerritoryId) return;
+
+    setTerritories(prev => {
+      const newTerritories = [...prev];
+      const index = newTerritories.findIndex(t => t.id === addModeTerritoryId);
+      if (index === -1) return prev;
+
+      const territory = { ...newTerritories[index] };
+      const existingIndex = territory.zips?.findIndex(z => z.zip === zip) ?? -1;
+      if (existingIndex !== -1) {
+        territory.zips = territory.zips.filter((_, i) => i !== existingIndex);
+        territory.population -= population;
+        territory.standAloneHouses -= (territory.zips[existingIndex].standAloneHouses || 0);
+      } else {
+        territory.zips = [...(territory.zips || []), { zip, pop: population, standAloneHouses }];
+        territory.population += population;
+        territory.standAloneHouses += standAloneHouses;
+      }
+      newTerritories[index] = territory;
+      console.log("[STATE UPDATE] Updated territory zips:", territory.zips, "population:", territory.population);
+      return newTerritories;
+    });
   };
 
   const handleSidebarTerritoryClick = (territory, e) => {
@@ -281,7 +293,6 @@ function MapPage() {
     setSelectedTerritoryId(territory.id);
 
     if (clearPopup) {
-      console.log("[Sidebar] Clearing county popup");
       clearPopup(null);
     }
   };
@@ -294,7 +305,6 @@ function MapPage() {
 
   return (
     <div style={{ height: "100vh", width: "100vw", display: "flex", overflow: "hidden" }}>
-      {/* Sidebar */}
       <div style={{
         width: "320px",
         background: "#f8fafc",
@@ -331,7 +341,7 @@ function MapPage() {
 
         {territories.length === 0 ? (
           <p style={{ fontSize: "0.875rem", color: "#6b7280" }}>
-            No territories yet. Create one and click "Add Counties" to start!
+            No territories yet. Create one and click "Add Areas" to start!
           </p>
         ) : (
           <ul style={{ listStyle: "none", padding: 0 }}>
@@ -404,18 +414,39 @@ function MapPage() {
                       cursor: "pointer",
                     }}
                   >
-                    {addModeTerritoryId === territory.id ? "Save Territory" : "Add Counties"}
+                    {addModeTerritoryId === territory.id ? "Save Territory" : "Add Areas"}
                   </button>
                 </div>
               </li>
             ))}
           </ul>
         )}
+
+        <div style={{ marginTop: "2rem" }}>
+          <h3 style={{ fontSize: "1.1rem", fontWeight: "600", marginBottom: "0.5rem" }}>
+            Boundary Display
+          </h3>
+          <select
+            value={boundaryMode}
+            onChange={(e) => setBoundaryMode(e.target.value)}
+            style={{
+              width: "100%",
+              padding: "8px",
+              borderRadius: "6px",
+              border: "1px solid #d1d5db",
+              background: "white",
+              fontSize: "0.95rem",
+            }}
+          >
+            <option value="counties">County lines only</option>
+            <option value="zips">Zipcode lines only</option>
+            <option value="both">Both</option>
+            <option value="none">None</option>
+          </select>
+        </div>
       </div>
 
-      {/* Map container */}
       <div style={{ height: "100%", width: "100%", position: "relative", flex: 1 }}>
-        {/* Search bar */}
         <div style={{
           position: "absolute",
           top: 20,
@@ -435,7 +466,7 @@ function MapPage() {
               type="text"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="Search city or state (e.g. Denver, Texas)"
+              placeholder="Search city, state, or ZIP"
               style={{
                 flex: 1,
                 padding: "14px 0",
@@ -444,11 +475,9 @@ function MapPage() {
                 outline: "none",
                 background: "transparent",
               }}
-              onKeyDown={handleSearchKeyDown}  // Fixed: now defined and used
             />
           </div>
 
-          {/* Suggestions dropdown */}
           {suggestions.length > 0 && (
             <ul
               ref={suggestionsRef}
@@ -492,16 +521,18 @@ function MapPage() {
 
         <MapContainerComponent
           territories={territories}
-          countyBoundaries={countyBoundaries}
           activeTerritoryId={activeTerritoryId}
           addModeTerritoryId={addModeTerritoryId}
           addCountyToActiveTerritory={addCountyToActiveTerritory}
+          addZipToActiveTerritory={addZipToActiveTerritory}
           selectedTerritoryId={selectedTerritoryId}
           setSelectedTerritoryId={setSelectedTerritoryId}
           clearTooltip={clearTooltip}
           setClearPopup={setClearPopup}
           selectedLocation={selectedLocation}
           selectedTerritory={selectedTerritory}
+          boundaryMode={boundaryMode}
+          countyBoundaries={countyBoundaries}
         />
 
         {selectedTerritory && (
