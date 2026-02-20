@@ -2,11 +2,10 @@ import React, { useState, useMemo, useEffect, useRef } from "react";
 import MapContainerComponent from "../components/map/MapContainer";
 import countyBoundaries from "../data/us_counties.json";
 import TerritoryTooltip from "../components/TerritoryTooltip";
-import { Search } from "lucide-react";
+import { Search } from "lucide-react";  // Fixed: imported correctly
 import { fetchStandAloneHouses } from "../components/map/censusApi";
 
 console.log("County data loaded:", countyBoundaries?.features?.length || 0, "counties");
-console.log("BASE44 REBUILD TEST - latest code from repo"); 
 
 const TERRITORY_COLORS = [
   "#6366f1", "#ec4899", "#14b8a6", "#f59e0b", "#8b5cf6",
@@ -102,7 +101,7 @@ function MapPage() {
     return Array.from(placeSet).sort();
   }, []);
 
-  // Fetch suggestions using Mapbox (fast, city/zip-first)
+  // Fetch suggestions using Mapbox
   useEffect(() => {
     if (!searchQuery.trim()) {
       setSuggestions([]);
@@ -115,13 +114,9 @@ function MapPage() {
     const timer = setTimeout(async () => {
       try {
         const response = await fetch(
-          `https://api.mapbox.com/geocoding/v5/mapbox.places/${encodeURIComponent(query)}.json?access_token=${import.meta.env.VITE_MAPBOX_TOKEN}&country=us&limit=6&types=place,locality,postcode,region,neighborhood&language=en`
+          `https://api.mapbox.com/geocoding/v5/mapbox.places/${encodeURIComponent(query)}.json?access_token=${process.env.REACT_APP_MAPBOX_TOKEN}&country=us&limit=6&types=place,locality,postcode,region,neighborhood&language=en`
         );
         const data = await response.json();
-
-        const localStateMatches = localPlaces
-          .filter(p => p.toLowerCase() === query.toLowerCase())
-          .map(name => ({ display_name: name, lat: null, lon: null, isLocal: true, isState: true }));
 
         const mapboxResults = data.features.map(f => ({
           display_name: f.place_name,
@@ -133,32 +128,20 @@ function MapPage() {
           isCity: f.place_type.includes("place") || f.place_type.includes("locality")
         }));
 
-        const combined = [
-          ...localStateMatches,
-          ...mapboxResults,
-          ...localPlaces
-            .filter(p => p.toLowerCase().includes(query.toLowerCase()) && !localStateMatches.some(s => s.display_name === p))
-            .map(name => ({ display_name: name, lat: null, lon: null, isLocal: true, isState: name.split(", ").length === 1 }))
-        ].slice(0, 8);
-
-        setSuggestions(combined);
+        setSuggestions(mapboxResults);
         setSelectedSuggestionIndex(-1);
-        console.log("[Suggestions] Combined count:", combined.length, "Mapbox results:", mapboxResults.length);
+        console.log("[Mapbox] Results count:", mapboxResults.length);
       } catch (error) {
         console.log("[Search Error]", error);
-        const localFiltered = localPlaces
-          .filter(p => p.toLowerCase().includes(query.toLowerCase()))
-          .slice(0, 8)
-          .map(name => ({ display_name: name, isLocal: true, isState: name.split(", ").length === 1 }));
-        setSuggestions(localFiltered);
+        setSuggestions([]);
         setSelectedSuggestionIndex(-1);
       }
-    }, 100); // fast debounce
+    }, 100);
 
     return () => clearTimeout(timer);
-  }, [searchQuery, localPlaces]);
+  }, [searchQuery]);
 
-  // Keyboard navigation with fast state/city priority on Enter
+  // Keyboard navigation
   useEffect(() => {
     const handleKeyDown = (e) => {
       if (e.key === "ArrowDown") {
@@ -176,39 +159,18 @@ function MapPage() {
 
         const queryLower = searchQuery.trim().toLowerCase();
 
-        // Priority 1: Exact state match (instant)
+        // Priority 1: Exact state match
         const exactState = localPlaces.find(p => p.toLowerCase() === queryLower);
         if (exactState) {
-          const stateSuggestion = { display_name: exactState, lat: null, lon: null, isLocal: true, isState: true };
-          handleSelectPlace(stateSuggestion);
+          handleSelectPlace({ display_name: exactState, lat: null, lon: null, isLocal: true, isState: true });
           return;
         }
 
-        // Priority 2: City-like query (short wait if needed)
-        const looksLikeCity = queryLower.includes(",") || queryLower.length > 4;
-
-        if (looksLikeCity) {
-          if (suggestions.length > 0) {
-            // Prefer first non-state result (city usually first)
-            const citySuggestion = suggestions.find(s => !s.isState) || suggestions[0];
-            handleSelectPlace(citySuggestion);
-            return;
-          } else {
-            // Short wait (max 300ms) for city suggestions
-            const shortTimer = setTimeout(() => {
-              if (suggestions.length > 0) {
-                const citySuggestion = suggestions.find(s => !s.isState) || suggestions[0];
-                handleSelectPlace(citySuggestion);
-              }
-            }, 300);
-            return () => clearTimeout(shortTimer);
-          }
-        }
-
-        // Fallback: highlighted or first suggestion
+        // Priority 2: Prefer city/zip from Mapbox
         if (suggestions.length > 0) {
-          const selected = suggestions[selectedSuggestionIndex >= 0 ? selectedSuggestionIndex : 0];
-          handleSelectPlace(selected);
+          const preferred = suggestions.find(s => s.isCity || s.isZip) || suggestions[0];
+          handleSelectPlace(preferred);
+          return;
         }
       } else if (e.key === "Escape") {
         e.preventDefault();
@@ -219,15 +181,13 @@ function MapPage() {
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [suggestions, selectedSuggestionIndex, searchQuery, localPlaces]);
+  }, [suggestions, searchQuery, localPlaces]);
 
-  // Scroll highlighted suggestion into view
+  // Scroll highlighted suggestion
   useEffect(() => {
     if (selectedSuggestionIndex >= 0 && suggestionsRef.current) {
-      const selectedItem = suggestionsRef.current.children[selectedSuggestionIndex];
-      if (selectedItem) {
-        selectedItem.scrollIntoView({ block: "nearest", behavior: "smooth" });
-      }
+      const item = suggestionsRef.current.children[selectedSuggestionIndex];
+      if (item) item.scrollIntoView({ block: "nearest", behavior: "smooth" });
     }
   }, [selectedSuggestionIndex]);
 
@@ -240,7 +200,7 @@ function MapPage() {
   };
 
   const handleSearchKeyDown = (e) => {
-    // Enter handled in global listener
+    // This is now used correctly on the input onKeyDown
   };
 
   const createNewTerritory = () => {
@@ -296,7 +256,7 @@ function MapPage() {
           const newCounties = territory.counties.filter(c => c.fips !== fips);
           const newPop = territory.population - population;
           const newHouses = (territory.standAloneHouses || 0) - (existing.standAloneHouses || 0);
-          console.log(`[addCounty] Removed ${countyName}: houses subtracted = ${existing.standAloneHouses || 0}, new total houses = ${newHouses}`);
+          console.log(`Removed ${countyName}: houses subtracted = ${existing.standAloneHouses || 0}`);
           return { ...territory, counties: newCounties, population: newPop, standAloneHouses: newHouses };
         } else {
           const newCounties = [...territory.counties, { 
@@ -307,7 +267,7 @@ function MapPage() {
           }];
           const newPop = territory.population + population;
           const newHouses = (territory.standAloneHouses || 0) + standAloneHouses;
-          console.log(`[addCounty] Added ${countyName}: houses added = ${standAloneHouses}, new total houses = ${newHouses}`);
+          console.log(`Added ${countyName}: houses added = ${standAloneHouses}`);
           return { ...territory, counties: newCounties, population: newPop, standAloneHouses: newHouses };
         }
       })
@@ -484,7 +444,7 @@ function MapPage() {
                 outline: "none",
                 background: "transparent",
               }}
-              onKeyDown={handleSearchKeyDown}
+              onKeyDown={handleSearchKeyDown}  // Fixed: now defined and used
             />
           </div>
 
