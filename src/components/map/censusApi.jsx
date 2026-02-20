@@ -40,3 +40,23 @@ export const getCountyName = async (stateFips, countyFips) => {
     return "Unknown County";
   }
 };
+
+export const fetchStandAloneHouses = async (stateFips, countyFips) => {
+  try {
+    // B25024_002E = 1-unit, detached houses (stand-alone/single-family homes)
+    const url = `https://api.census.gov/data/2022/acs/acs5?get=B25024_002E&for=county:${countyFips}&in=state:${stateFips}&key=${CENSUS_API_KEY}`;
+    console.log("Fetching stand-alone houses from:", url);
+    const response = await fetch(url);
+    if (!response.ok) {
+      console.log("ACS houses response not OK:", response.status);
+      throw new Error(`Census API error: ${response.status}`);
+    }
+    const data = await response.json();
+    console.log("ACS stand-alone houses response:", data);
+    // data[1][0] is the number
+    return parseInt(data[1][0], 10) || 0;
+  } catch (err) {
+    console.error("Stand-alone houses fetch failed:", err);
+    return 0;
+  }
+};

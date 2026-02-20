@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from "react";
 import { MapContainer as LeafletMap, TileLayer, GeoJSON, Popup, useMap, useMapEvents } from "react-leaflet";
 import { Loader2 } from "lucide-react";
 import LeafletDrawControl from "./LeafletDrawControl";
-import { fetchCountyPopulation, getCountyName } from "./censusApi";
+import { fetchCountyPopulation, getCountyName, fetchStandAloneHouses } from "./censusApi";
 import L from "leaflet";
 import usStatesGeoJSON from "../../data/us_states.json";
 
@@ -342,7 +342,7 @@ export default function MapContainerComponent({
 
     if (!fips || fips.length < 5) {
       const name = props.NAME || props.name || "Unknown County";
-      setPopupInfo({ name, population: null });
+      setPopupInfo({ name, population: null, standAloneHouses: null });
       return;
     }
 
@@ -351,16 +351,17 @@ export default function MapContainerComponent({
 
     const name = await getCountyName(stateFips, countyFips) || props.NAME || "Unknown County";
     const population = await fetchCountyPopulation(stateFips, countyFips);
+    const standAloneHouses = await fetchStandAloneHouses(stateFips, countyFips);
 
     if (addModeTerritoryId) {
       addCountyToActiveTerritory(fips, population, name);
     } else {
-      // Single-county popup - no state line
       setPopupInfo({
         lat: layer.getBounds().getCenter().lat,
         lng: layer.getBounds().getCenter().lng,
         name,
         population,
+        standAloneHouses,
       });
     }
   };
@@ -485,22 +486,36 @@ export default function MapContainerComponent({
           );
         })}
 
-        {/* Popup - no state line */}
+        {/* Popup - safe null checks + loading */}
         {popupInfo && (
           <Popup position={[popupInfo.lat, popupInfo.lng]} onClose={() => setPopupInfo(null)}>
-            <div className="min-w-[200px]">
-              <h3 className="font-semibold text-sm text-gray-900">{popupInfo.name}</h3>
+            <div className="min-w-[220px]">
+              <h3 className="font-semibold text-base text-gray-900 mb-3">
+                {popupInfo.name}
+              </h3>
+
               {popupInfo.population !== null ? (
-                <div className="mt-2">
-                  <p className="text-xs text-gray-500">Population (2023 est.)</p>
-                  <p className="text-lg font-bold text-indigo-600">
-                    {popupInfo.population.toLocaleString()}
-                  </p>
+                <div className="space-y-3">
+                  <div>
+                    <p className="text-xs text-gray-600">Population (2023 est.)</p>
+                    <p className="text-xl font-bold text-indigo-700">
+                      {popupInfo.population.toLocaleString()}
+                    </p>
+                  </div>
+
+                  <div>
+                    <p className="text-xs text-gray-600">Stand-alone houses</p>
+                    <p className="text-xl font-bold text-indigo-700">
+                      {popupInfo.standAloneHouses !== undefined && popupInfo.standAloneHouses !== null
+                        ? popupInfo.standAloneHouses.toLocaleString()
+                        : "Loading..."}
+                    </p>
+                  </div>
                 </div>
               ) : (
-                <div className="flex items-center gap-2 mt-2">
-                  <Loader2 className="w-3 h-3 animate-spin" />
-                  <span className="text-xs text-gray-400">Loading...</span>
+                <div className="flex items-center gap-3 py-2">
+                  <Loader2 className="w-5 h-5 animate-spin text-indigo-600" />
+                  <span className="text-sm text-gray-500">Loading data...</span>
                 </div>
               )}
             </div>
