@@ -90,7 +90,6 @@ const stateNameToAbbr = {
   "massachusetts": "ma",
   "michigan": "mi",
   "minnesota": "mn",
-  "mississippi": "ms",
   "missouri": "mo",
   "montana": "mt",
   "nebraska": "ne",
@@ -358,6 +357,7 @@ export default function MapContainerComponent({
     setTimeout(() => {
       map.invalidateSize(false);
     }, 300);
+    map.addLayer(zipLayerGroupRef.current);
   };
 
   useEffect(() => {
@@ -509,8 +509,8 @@ export default function MapContainerComponent({
                 // CRITICAL: Flip all coordinates [lng, lat] → [lat, lng]
         geo = turf.flip(geo);
 
-        // Simplify to reduce lag
-        geo = turf.simplify(geo, { tolerance: 0.001, highQuality: true });
+        // Simplify to reduce lag - reduced tolerance for better visibility
+        geo = turf.simplify(geo, { tolerance: 0.0001, highQuality: true });
 
         const layer = L.geoJSON(geo, {
           style: (feature) => ({
@@ -793,15 +793,15 @@ export default function MapContainerComponent({
               {popupInfo.population !== null ? (
                 <div className="space-y-3">
                   <div>
-                    <p className="text-xs text-gray-600">Population (2023 est.)</p>
-                    <p className="text-xl font-bold text-indigo-700">
+                    <p class="text-xs text-gray-600">Population (2023 est.)</p>
+                    <p class="text-xl font-bold text-indigo-700">
                       {popupInfo.population.toLocaleString()}
                     </p>
                   </div>
 
                   <div>
-                    <p className="text-xs text-gray-600">Stand-alone houses</p>
-                    <p className="text-xl font-bold text-indigo-700">
+                    <p class="text-xs text-gray-600">Stand-alone houses</p>
+                    <p class="text-xl font-bold text-indigo-700">
                       {popupInfo.standAloneHouses !== undefined && popupInfo.standAloneHouses !== null
                         ? popupInfo.standAloneHouses.toLocaleString()
                         : "Loading..."}
