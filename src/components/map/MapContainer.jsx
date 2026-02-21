@@ -241,41 +241,61 @@ export default function MapContainerComponent({
   const addModeRef = useRef(addModeTerritoryId);
   const territoriesRef = useRef(territories);
   const activeTerritoryIdRef = useRef(activeTerritoryId);
+  const zipDataCache = useRef({});
   const [loadingZips, setLoadingZips] = useState(false);
   const [popupInfo, setPopupInfo] = useState(null);
 
-  // Sync refs with latest props
+  // Sync refs
   useEffect(() => {
     addModeRef.current = addModeTerritoryId;
     territoriesRef.current = territories;
     activeTerritoryIdRef.current = activeTerritoryId;
-    console.log("[REF SYNC] addMode:", addModeRef.current, "territories count:", territoriesRef.current.length);
   }, [addModeTerritoryId, territories, activeTerritoryId]);
 
-  // Re-style all loaded ZIP layers when territories or active territory changes
+  // Re-style on territory/active changes
   useEffect(() => {
-    console.log("[STYLE UPDATE] Territories or active ID changed - re-styling all ZIP layers");
     Object.values(loadedZipLayers.current).forEach(layer => {
-      let updated = 0;
       layer.eachLayer(subLayer => {
         if (subLayer.feature) {
-          const newStyle = getZipStyle(subLayer.feature);
-          subLayer.setStyle(newStyle);
-          updated++;
-          // Keep saved pre-hover style in sync if currently hovering
+          subLayer.setStyle(getZipStyle(subLayer.feature));
           if (subLayer._preHoverStyle) {
-            subLayer._preHoverStyle = { ...newStyle };
+            subLayer._preHoverStyle = { ...getZipStyle(subLayer.feature) };
           }
         }
       });
-      console.log("[STYLE UPDATE] Updated", updated, "features");
     });
   }, [territories, activeTerritoryId]);
+
+  // Reload ZIP layers when addMode changes (to refresh click handlers with current addMode)
+  useEffect(() => {
+    const showZips = boundaryMode === "zips" || boundaryMode === "both";
+    if (!showZips || !mapRef.current) return;
+
+    zipLayerGroupRef.current.clearLayers();
+    loadedZipLayers.current = {};
+
+    const center = mapRef.current.getCenter();
+    const centerPt = turf.point([center.lng, center.lat]);
+    const visibleAbbrs = new Set();
+
+    usStatesGeoJSON.features.forEach((feature) => {
+      if (feature.geometry && booleanPointInPolygon(centerPt, feature)) {
+        let abbr =
+          feature.properties.STUSPS?.toLowerCase() ||
+          feature.properties.STATEFP ||
+          stateNameToAbbr[(feature.properties.NAME || "").toLowerCase().trim()];
+        if (abbr) visibleAbbrs.add(abbr);
+      }
+    });
+
+    const toLoad = visibleAbbrs.size === 0 ? ["tx"] : [...visibleAbbrs];
+    setLoadingZips(true);
+    loadZipForStates(toLoad);
+  }, [addModeTerritoryId, boundaryMode]);
 
   const mapCreated = (map) => {
     mapRef.current = map;
     window._debugMapRef = map;
-    console.log("[DEBUG] Map created and ref set:", map.getCenter());
     setTimeout(() => {
       map.invalidateSize(false);
     }, 300);
@@ -293,27 +313,25 @@ export default function MapContainerComponent({
     const map = mapRef.current;
     const bounds = L.latLngBounds([]);
 
-    if (selectedTerritory.counties.length === 0) {
-      console.log("[FitBounds] Skipping - empty territory");
+    if (selectedTerritory.counties.length === 0 && selectedTerritory.zips?.length === 0) {
       return;
     }
 
-    selectedTerritory.counties.forEach((c) => {
-      const fips = c.fips;
-      const feature = countyBoundaries.features.find(
-        (f) => f.properties.GEOID === fips
-      );
-      if (feature && feature.geometry) {
-        const geoJsonLayer = L.geoJSON(feature);
-        bounds.extend(geoJsonLayer.getBounds());
-      }
-    });
+    if (selectedTerritory.counties.length > 0) {
+      selectedTerritory.counties.forEach((c) => {
+        const fips = c.fips;
+        const feature = countyBoundaries.features.find(
+          (f) => f.properties.GEOID === fips
+        );
+        if (feature && feature.geometry) {
+          const geoJsonLayer = L.geoJSON(feature);
+          bounds.extend(geoJsonLayer.getBounds());
+        }
+      });
+    }
 
     if (bounds.isValid()) {
-      console.log("[FitBounds] Fitting to existing counties");
       map.fitBounds(bounds, { padding: [60, 60], maxZoom: 10 });
-    } else {
-      console.log("[FitBounds] No valid bounds - skipping");
     }
   }, [selectedTerritory, countyBoundaries]);
 
@@ -321,8 +339,6 @@ export default function MapContainerComponent({
     if (!selectedLocation || !mapRef.current) return;
 
     const map = mapRef.current;
-
-    console.log("[Search] Centering on:", selectedLocation);
 
     if (selectedLocation.bounds) {
       const [minLat, maxLat, minLon, maxLon] = selectedLocation.bounds;
@@ -352,7 +368,6 @@ export default function MapContainerComponent({
         });
         if (stateBounds.isValid()) {
           map.fitBounds(stateBounds, { padding: [80, 80], maxZoom: 8 });
-          console.log("[Search] Zoomed to state:", fipsToState[stateFips]);
           return;
         }
       }
@@ -391,8 +406,6 @@ export default function MapContainerComponent({
 
     if (targetBounds && targetBounds.isValid()) {
       map.fitBounds(targetBounds, { padding: [80, 80], maxZoom: 12 });
-    } else {
-      console.log("[Search] No match found for:", query);
     }
   }, [selectedLocation, countyBoundaries]);
 
@@ -415,13 +428,9 @@ export default function MapContainerComponent({
     map.addLayer(zipLayerGroupRef.current);
 
     const center = map.getCenter();
-    console.log("[ZIP Debug] Current center:", center);
-
     const centerPt = turf.point([center.lng, center.lat]);
 
     const visibleAbbrs = new Set();
-
-    console.log("[ZIP Debug] Checking", usStatesGeoJSON.features.length, "state features");
 
     usStatesGeoJSON.features.forEach((feature) => {
       if (feature.geometry && booleanPointInPolygon(centerPt, feature)) {
@@ -432,26 +441,35 @@ export default function MapContainerComponent({
 
         if (abbr) {
           visibleAbbrs.add(abbr);
-          console.log("[ZIP Debug] Matched state:", abbr, feature.properties);
         }
       }
     });
 
-    if (visibleAbbrs.size === 0) {
-      console.log("[ZIP] No state detected - loading Texas as fallback");
-      loadZipForStates(["tx"]);
-      return;
-    }
-
-    const toLoad = [...visibleAbbrs].filter(abbr => !loadedZipLayers.current[abbr]);
+    const toLoad = visibleAbbrs.size === 0 ? ["tx"] : [...visibleAbbrs].filter(abbr => !loadedZipLayers.current[abbr]);
 
     if (toLoad.length > 0) {
       setLoadingZips(true);
       loadZipForStates(toLoad);
-    } else {
-      console.log("[ZIP] All detected states already loaded");
     }
   }, [boundaryMode]);
+
+  const getZipPopupContent = (zip, population, standAloneHouses) => {
+    return `
+      <div class="min-w-[220px]">
+        <h3 class="font-semibold text-base text-gray-900 mb-3">ZIP ${zip}</h3>
+        <div class="space-y-3">
+          <div>
+            <p class="text-xs text-gray-600">Population (2023 est.)</p>
+            <p class="text-xl font-bold text-indigo-700">${population.toLocaleString()}</p>
+          </div>
+          <div>
+            <p class="text-xs text-gray-600">Stand-alone houses</p>
+            <p class="text-xl font-bold text-indigo-700">${standAloneHouses.toLocaleString()}</p>
+          </div>
+        </div>
+      </div>
+    `;
+  };
 
   const loadZipForStates = async (abbrs) => {
     const baseUrl = "https://raw.githubusercontent.com/OpenDataDE/State-zip-code-GeoJSON/master/";
@@ -482,63 +500,77 @@ export default function MapContainerComponent({
 
             layer.on({
               click: async (e) => {
+                L.DomEvent.stopPropagation(e);
                 const clickedLayer = e.target;
-                console.log("[ZIP CLICK] Clicked ZIP:", zip);
 
-                if (!addModeRef.current) {
-                  console.log("[ZIP CLICK] No add mode - ignoring");
-                  return;
-                }
+                if (addModeRef.current) {
+                  const currentTerrs = territoriesRef.current;
+                  const addTerrId = addModeRef.current;
+                  const addTerritory = currentTerrs.find(t => t.id === addTerrId);
+                  if (!addTerritory) return;
 
-                const currentTerrs = territoriesRef.current;
-                const addTerrId = addModeRef.current;
-                const addTerritory = currentTerrs.find(t => t.id === addTerrId);
-                if (!addTerritory) {
-                  console.log("[ZIP CLICK] Add-mode territory not found");
-                  return;
-                }
+                  const currentlyAdded = !!addTerritory.zips?.find(z => String(z.zip) === zip);
+                  const willAdd = !currentlyAdded;
 
-                const currentlyAdded = !!addTerritory.zips?.find(z => String(z.zip) === zip);
-                const willAdd = !currentlyAdded;
+                  const optimisticStyle = willAdd
+                    ? {
+                        color: addTerritory.color,
+                        weight: addTerritory.id === activeTerritoryIdRef.current ? 4 : 2,
+                        opacity: 1,
+                        fillColor: addTerritory.color,
+                        fillOpacity: addTerritory.id === activeTerritoryIdRef.current ? 0.6 : 0.4,
+                      }
+                    : {
+                        color: "#4b5563",
+                        weight: 0.8,
+                        opacity: 0.5,
+                        fillColor: "#e2e8f0",
+                        fillOpacity: 0.15,
+                      };
 
-                // Compute optimistic style
-                const optimisticStyle = willAdd
-                  ? {
-                      color: addTerritory.color,
-                      weight: addTerritory.id === activeTerritoryIdRef.current ? 4 : 2,
-                      opacity: 1,
-                      fillColor: addTerritory.color,
-                      fillOpacity: addTerritory.id === activeTerritoryIdRef.current ? 0.6 : 0.4,
+                  clickedLayer.setStyle(optimisticStyle);
+                  clickedLayer._preHoverStyle = optimisticStyle;
+
+                  let population = 0;
+                  let standAloneHouses = 0;
+
+                  if (zipDataCache.current[zip]) {
+                    const cached = zipDataCache.current[zip];
+                    population = cached.population || 0;
+                    standAloneHouses = cached.standAloneHouses || 0;
+                  } else {
+                    try {
+                      const data = await fetchZipPopulationAndHouses(zip);
+                      population = data.population || 0;
+                      standAloneHouses = data.standAloneHouses || 0;
+                      zipDataCache.current[zip] = { population, standAloneHouses };
+                    } catch (err) {
+                      console.error("[ZIP CLICK] Census fetch failed for ZIP", zip, ":", err);
+                      population = 0;
+                      standAloneHouses = 0;
+                      zipDataCache.current[zip] = { population, standAloneHouses };
                     }
-                  : {
-                      color: "#4b5563",
-                      weight: 0.8,
-                      opacity: 0.5,
-                      fillColor: "#e2e8f0",
-                      fillOpacity: 0.15,
-                    };
+                  }
 
-                // Apply optimistic style immediately
-                clickedLayer.setStyle(optimisticStyle);
-
-                // Ensure the saved pre-hover style (if hovering) is updated to the new base
-                clickedLayer._preHoverStyle = optimisticStyle;
-
-                try {
-                  const { population, standAloneHouses } = await fetchZipPopulationAndHouses(zip);
                   addZipToActiveTerritory(zip, population, standAloneHouses);
-                  console.log("[ZIP CLICK] ZIP added/removed successfully");
-                } catch (err) {
-                  console.error("[ZIP CLICK] Census fetch failed:", err);
-                  // Revert to pre-click base style
-                  const revertStyle = getZipStyle(feature);
-                  clickedLayer.setStyle(revertStyle);
-                  clickedLayer._preHoverStyle = revertStyle;
+                } else {
+                  const cached = zipDataCache.current[zip];
+                  if (cached) {
+                    clickedLayer.bindPopup(getZipPopupContent(zip, cached.population, cached.standAloneHouses)).openPopup();
+                  } else {
+                    clickedLayer.bindPopup("Loading data...").openPopup();
+                    try {
+                      const data = await fetchZipPopulationAndHouses(zip);
+                      zipDataCache.current[zip] = data;
+                      clickedLayer.setPopupContent(getZipPopupContent(zip, data.population || 0, data.standAloneHouses || 0));
+                    } catch (err) {
+                      clickedLayer.setPopupContent("Data not available");
+                    }
+                  }
                 }
               },
               mouseover: (e) => {
                 const layer = e.target;
-                // Save the current base style
                 layer._preHoverStyle = {
                   weight: layer.options.weight,
                   color: layer.options.color,
@@ -547,7 +579,6 @@ export default function MapContainerComponent({
                   fillOpacity: layer.options.fillOpacity,
                 };
 
-                // Apply strong hover highlight
                 layer.setStyle({
                   weight: 5,
                   color: "#ff7800",
@@ -558,7 +589,6 @@ export default function MapContainerComponent({
               },
               mouseout: (e) => {
                 const layer = e.target;
-                // Always restore the saved base style (which is now the post-click style)
                 if (layer._preHoverStyle) {
                   layer.setStyle(layer._preHoverStyle);
                 }
@@ -569,7 +599,6 @@ export default function MapContainerComponent({
 
         zipLayerGroupRef.current.addLayer(layer);
         loadedZipLayers.current[abbr] = layer;
-        console.log(`[ZIP] Loaded ${stateObj.name} (${abbr})`);
       } catch (err) {
         console.error(`[ZIP] Load error for ${abbr}:`, err);
       }
@@ -638,11 +667,6 @@ export default function MapContainerComponent({
   };
 
   const handleCountyClick = async (feature, layer, e) => {
-    console.log("=== COUNTY CLICK DETECTED ===");
-    console.log("Feature properties:", feature.properties);
-    console.log("Active territory ID:", activeTerritoryId);
-    console.log("Add mode territory ID:", addModeTerritoryId);
-
     const props = feature.properties || {};
     let fips = props.GEOID || (props.STATEFP + props.COUNTYFP) || props.FIPS || props.statefp + props.countyfp || props.countyfp;
 

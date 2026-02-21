@@ -3,7 +3,7 @@ import MapContainerComponent from "../components/map/MapContainer";
 import countyBoundaries from "../data/us_counties.json";
 import TerritoryTooltip from "../components/TerritoryTooltip";
 import { Search } from "lucide-react";
-import { fetchStandAloneHouses, fetchZipPopulationAndHouses } from "../components/map/censusApi";
+import { fetchStandAloneHouses } from "../components/map/censusApi"; // Fixed import
 
 console.log("County data loaded:", countyBoundaries?.features?.length || 0, "counties");
 
@@ -202,8 +202,6 @@ function MapPage() {
       id: Date.now().toString(),
       name,
       color: TERRITORY_COLORS[territories.length % TERRITORY_COLORS.length],
-      population: 0,
-      standAloneHouses: 0,
       counties: [],
       zips: [],
     };
@@ -229,7 +227,13 @@ function MapPage() {
   };
 
   const toggleAddMode = (id) => {
-    setAddModeTerritoryId(prev => (prev === id ? null : id));
+    setAddModeTerritoryId(prev => {
+      const newMode = prev === id ? null : id;
+      if (newMode) {
+        setActiveTerritoryId(id);
+      }
+      return newMode;
+    });
   };
 
   const addCountyToActiveTerritory = async (fips, population, countyName) => {
@@ -238,7 +242,13 @@ function MapPage() {
     const stateFips = fips.slice(0, 2);
     const countyFips = fips.slice(2);
 
-    const standAloneHouses = await fetchStandAloneHouses(stateFips, countyFips);
+    let standAloneHouses = 0;
+    try {
+      standAloneHouses = await fetchStandAloneHouses(stateFips, countyFips);
+    } catch (err) {
+      console.error("Failed to fetch stand-alone houses for county", fips, err);
+      standAloneHouses = 0;
+    }
 
     setTerritories(prev => {
       const newTerritories = [...prev];
@@ -249,19 +259,15 @@ function MapPage() {
       const existingIndex = territory.counties.findIndex(c => c.fips === fips);
       if (existingIndex !== -1) {
         territory.counties = territory.counties.filter((_, i) => i !== existingIndex);
-        territory.population -= population;
-        territory.standAloneHouses -= (territory.counties[existingIndex].standAloneHouses || 0);
       } else {
-        territory.counties = [...territory.counties, { fips, pop: population, name: countyName, standAloneHouses }];
-        territory.population += population;
-        territory.standAloneHouses += standAloneHouses;
+        territory.counties = [...territory.counties, { fips, pop: Number(population), name: countyName, standAloneHouses: Number(standAloneHouses) }];
       }
       newTerritories[index] = territory;
       return newTerritories;
     });
   };
 
-  const addZipToActiveTerritory = async (zip, population, standAloneHouses) => {
+  const addZipToActiveTerritory = (zip, population, standAloneHouses) => {
     if (!addModeTerritoryId) return;
 
     setTerritories(prev => {
@@ -270,18 +276,14 @@ function MapPage() {
       if (index === -1) return prev;
 
       const territory = { ...newTerritories[index] };
-      const existingIndex = territory.zips?.findIndex(z => z.zip === zip) ?? -1;
+      const existingIndex = territory.zips?.findIndex(z => String(z.zip) === String(zip)) ?? -1;
+
       if (existingIndex !== -1) {
         territory.zips = territory.zips.filter((_, i) => i !== existingIndex);
-        territory.population -= population;
-        territory.standAloneHouses -= (territory.zips[existingIndex].standAloneHouses || 0);
       } else {
-        territory.zips = [...(territory.zips || []), { zip, pop: population, standAloneHouses }];
-        territory.population += population;
-        territory.standAloneHouses += standAloneHouses;
+        territory.zips = [...(territory.zips || []), { zip, pop: Number(population), standAloneHouses: Number(standAloneHouses) }];
       }
       newTerritories[index] = territory;
-      console.log("[STATE UPDATE] Updated territory zips:", territory.zips, "population:", territory.population);
       return newTerritories;
     });
   };
@@ -302,6 +304,20 @@ function MapPage() {
   };
 
   const selectedTerritory = territories.find(t => t.id === selectedTerritoryId);
+
+  const getTerritoryStats = (territory) => {
+    const countyPop = territory.counties.reduce((sum, c) => sum + (Number(c.pop) || 0), 0);
+    const countyHouses = territory.counties.reduce((sum, c) => sum + (Number(c.standAloneHouses) || 0), 0);
+    const zipPop = (territory.zips || []).reduce((sum, z) => sum + (Number(z.pop) || 0), 0);
+    const zipHouses = (territory.zips || []).reduce((sum, z) => sum + (Number(z.standAloneHouses) || 0), 0);
+
+    return {
+      population: countyPop + zipPop,
+      standAloneHouses: countyHouses + zipHouses,
+      zipCount: territory.zips?.length || 0,
+      countyCount: territory.counties.length,
+    };
+  };
 
   return (
     <div style={{ height: "100vh", width: "100vw", display: "flex", overflow: "hidden" }}>
@@ -345,80 +361,88 @@ function MapPage() {
           </p>
         ) : (
           <ul style={{ listStyle: "none", padding: 0 }}>
-            {territories.map((territory) => (
-              <li
-                key={territory.id}
-                onClick={(e) => handleSidebarTerritoryClick(territory, e)}
-                style={{
-                  padding: "10px",
-                  background: activeTerritoryId === territory.id ? "#dbeafe" : "#f1f5f9",
-                  borderRadius: "6px",
-                  marginBottom: "8px",
-                  display: "flex",
-                  flexDirection: "column",
-                  cursor: "pointer",
-                  border: activeTerritoryId === territory.id ? "2px solid #3b82f6" : "none",
-                }}
-              >
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                  <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-                    <span style={{ color: territory.color, fontSize: "1.2rem" }}>●</span>
-                    <span
-                      contentEditable
-                      suppressContentEditableWarning
-                      onBlur={(e) => renameTerritory(territory.id, e.target.innerText.trim() || territory.name)}
+            {territories.map((territory) => {
+              const stats = getTerritoryStats(territory);
+
+              return (
+                <li
+                  key={territory.id}
+                  onClick={(e) => handleSidebarTerritoryClick(territory, e)}
+                  style={{
+                    padding: "10px",
+                    background: activeTerritoryId === territory.id ? "#dbeafe" : "#f1f5f9",
+                    borderRadius: "6px",
+                    marginBottom: "8px",
+                    display: "flex",
+                    flexDirection: "column",
+                    cursor: "pointer",
+                    border: activeTerritoryId === territory.id ? "2px solid #3b82f6" : "none",
+                  }}
+                >
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                      <span style={{ color: territory.color, fontSize: "1.2rem" }}>●</span>
+                      <span
+                        contentEditable
+                        suppressContentEditableWarning
+                        onBlur={(e) => renameTerritory(territory.id, e.target.innerText.trim() || territory.name)}
+                        style={{
+                          cursor: "pointer",
+                          minWidth: "100px",
+                          outline: "none",
+                          fontWeight: activeTerritoryId === territory.id ? "bold" : "normal",
+                        }}
+                      >
+                        {territory.name}
+                      </span>
+                    </div>
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        deleteTerritory(territory.id);
+                      }}
                       style={{
+                        background: "none",
+                        border: "none",
+                        color: "#ef4444",
                         cursor: "pointer",
-                        minWidth: "100px",
-                        outline: "none",
-                        fontWeight: activeTerritoryId === territory.id ? "bold" : "normal",
+                        fontSize: "0.9rem",
                       }}
                     >
-                      {territory.name}
-                    </span>
+                      Delete
+                    </button>
                   </div>
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      deleteTerritory(territory.id);
-                    }}
-                    style={{
-                      background: "none",
-                      border: "none",
-                      color: "#ef4444",
-                      cursor: "pointer",
-                      fontSize: "0.9rem",
-                    }}
-                  >
-                    Delete
-                  </button>
-                </div>
 
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: "8px" }}>
-                  <span style={{ fontSize: "0.9rem", color: "#4b5563" }}>
-                    Pop: {territory.population.toLocaleString()}
-                  </span>
+                  <div style={{ marginTop: "8px", fontSize: "0.9rem", color: "#4b5563" }}>
+                    <div>Pop: {stats.population.toLocaleString()}</div>
+                    <div>Houses: {stats.standAloneHouses.toLocaleString()}</div>
+                    <div style={{ fontSize: "0.8rem", color: "#6b7280", marginTop: "4px" }}>
+                      Zipcodes: {stats.zipCount} | Counties: {stats.countyCount}
+                    </div>
+                  </div>
 
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      toggleAddMode(territory.id);
-                    }}
-                    style={{
-                      padding: "4px 8px",
-                      background: addModeTerritoryId === territory.id ? "#10b981" : "#6b7280",
-                      color: "white",
-                      border: "none",
-                      borderRadius: "4px",
-                      fontSize: "0.8rem",
-                      cursor: "pointer",
-                    }}
-                  >
-                    {addModeTerritoryId === territory.id ? "Save Territory" : "Add Areas"}
-                  </button>
-                </div>
-              </li>
-            ))}
+                  <div style={{ display: "flex", justifyContent: "flex-end", marginTop: "8px" }}>
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        toggleAddMode(territory.id);
+                      }}
+                      style={{
+                        padding: "4px 8px",
+                        background: addModeTerritoryId === territory.id ? "#10b981" : "#6b7280",
+                        color: "white",
+                        border: "none",
+                        borderRadius: "4px",
+                        fontSize: "0.8rem",
+                        cursor: "pointer",
+                      }}
+                    >
+                      {addModeTerritoryId === territory.id ? "Save Territory" : "Add Areas"}
+                    </button>
+                  </div>
+                </li>
+              );
+            })}
           </ul>
         )}
 
