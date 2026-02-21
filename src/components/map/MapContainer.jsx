@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
-import { MapContainer as LeafletMap, TileLayer, GeoJSON, Popup, useMap, useMapEvents } from "react-leaflet";
+import { MapContainer as LeafletMap, TileLayer, GeoJSON, Popup, useMap } from "react-leaflet";
 import { Loader2 } from "lucide-react";
 import L from "leaflet";
 import * as turf from "@turf/turf";
@@ -173,15 +173,6 @@ const ZIP_STATE_FILES = [
   { abbr: "wy", name: "wyoming" },
 ];
 
-function MapEventHandler({ onMapClick, drawingMode }) {
-  useMapEvents({
-    click: (e) => {
-      if (drawingMode) onMapClick?.(e.latlng);
-    },
-  });
-  return null;
-}
-
 function MapInvalidator() {
   const map = useMap();
   useEffect(() => {
@@ -241,44 +232,117 @@ export default function MapContainerComponent({
   const territoriesRef = useRef(territories);
   const activeTerritoryIdRef = useRef(activeTerritoryId);
   const zipDataCache = useRef({});
-  const [loadingZips, setLoadingZips] = useState(false);
+    const [loadingZips, setLoadingZips] = useState(false);
   const [popupInfo, setPopupInfo] = useState(null);
+  const [currentLoadedStateAbbr, setCurrentLoadedStateAbbr] = useState(null);
+  const moveTimeoutRef = useRef(null);
 
-  // Sync refs with latest props
   useEffect(() => {
     addModeRef.current = addModeTerritoryId;
     territoriesRef.current = territories;
     activeTerritoryIdRef.current = activeTerritoryId;
   }, [addModeTerritoryId, territories, activeTerritoryId]);
 
-  // Re-style all loaded ZIP layers when territories or active territory changes
   useEffect(() => {
     Object.values(loadedZipLayers.current).forEach(layer => {
       layer.eachLayer(subLayer => {
         if (subLayer.feature) {
           subLayer.setStyle(getZipStyle(subLayer.feature));
-          if (subLayer._preHoverStyle) {
-            subLayer._preHoverStyle = { ...getZipStyle(subLayer.feature) };
-          }
         }
       });
     });
   }, [territories, activeTerritoryId]);
 
-  // Reload ZIP layers when addMode changes (to refresh click handlers with current addMode)
+    const updateZipForCenter = () => {
+    if (!mapRef.current) return;
+
+    const center = mapRef.current.getCenter();
+    const centerPt = turf.point([center.lng, center.lat]);
+
+    let selectedAbbr = null;
+    let minDist = Infinity;
+
+    for (const feature of usStatesGeoJSON.features) {
+      if (feature.geometry) {
+        const centroid = turf.centroid(feature);
+        const dist = turf.distance(centerPt, centroid, { units: "kilometers" });
+
+        let abbr = (
+          feature.properties.STUSPS ||
+          feature.properties.STUSPS?.toLowerCase() ||
+          feature.properties.statefp ||
+          feature.properties.STATEFP ||
+          feature.properties.postal ||
+          feature.properties.POSTAL ||
+          feature.properties.STATE ||
+          feature.properties.state ||
+          stateNameToAbbr[(feature.properties.NAME || feature.properties.name || "").toLowerCase().trim()]
+        );
+
+        if (abbr) {
+          abbr = abbr.toLowerCase();
+          if (dist < minDist) {
+            minDist = dist;
+            selectedAbbr = abbr;
+          }
+        }
+      }
+    }
+
+    if (selectedAbbr !== currentLoadedStateAbbr) {
+      // Remove old state
+      if (currentLoadedStateAbbr && loadedZipLayers.current[currentLoadedStateAbbr]) {
+        zipLayerGroupRef.current.removeLayer(loadedZipLayers.current[currentLoadedStateAbbr]);
+        delete loadedZipLayers.current[currentLoadedStateAbbr];
+      }
+
+      // Load new state
+      if (selectedAbbr) {
+        setLoadingZips(true);
+        loadZipForStates([selectedAbbr]).then(() => {
+          setCurrentLoadedStateAbbr(selectedAbbr);
+        });
+      } else {
+        setCurrentLoadedStateAbbr(null);
+      }
+    }
+  };
+
   useEffect(() => {
     const showZips = boundaryMode === "zips" || boundaryMode === "both";
-    if (!showZips || !mapRef.current) return;
+    if (!showZips) {
+      // Clear all zip layers
+      zipLayerGroupRef.current.clearLayers();
+      loadedZipLayers.current = {};
+      setCurrentLoadedStateAbbr(null);
+      return;
+    }
 
-    zipLayerGroupRef.current.clearLayers();
-    loadedZipLayers.current = {};
+    updateZipForCenter();
+  }, [boundaryMode]);
 
-    loadVisibleZips();
-  }, [addModeTerritoryId, boundaryMode]);
+  useEffect(() => {
+    if (!mapRef.current) return;
+
+    const map = mapRef.current;
+    const showZips = boundaryMode === "zips" || boundaryMode === "both";
+    if (!showZips) return;
+
+    const handleMoveEnd = () => {
+      clearTimeout(moveTimeoutRef.current);
+      moveTimeoutRef.current = setTimeout(updateZipForCenter, 500); // Debounce
+    };
+
+    map.on('moveend', handleMoveEnd);
+
+    return () => {
+      map.off('moveend', handleMoveEnd);
+      clearTimeout(moveTimeoutRef.current);
+    };
+  }, [boundaryMode, currentLoadedStateAbbr]);
 
   const mapCreated = (map) => {
     mapRef.current = map;
-    window._debugMapRef = map;
     setTimeout(() => {
       map.invalidateSize(false);
     }, 300);
@@ -392,87 +456,6 @@ export default function MapContainerComponent({
     }
   }, [selectedLocation, countyBoundaries]);
 
-  const loadVisibleZips = () => {
-    if (!mapRef.current) return;
-
-    const center = mapRef.current.getCenter();
-    const centerPt = turf.point([center.lng, center.lat]);
-
-    console.log("[ZIP DEBUG] Map center:", center.lat.toFixed(6), center.lng.toFixed(6));
-
-    let selectedAbbr = null;
-    let minDist = Infinity;
-    let closestStateName = "None";
-
-    // Find closest state by centroid distance
-    for (const feature of usStatesGeoJSON.features) {
-      if (feature.geometry) {
-        const centroid = turf.centroid(feature);
-        const dist = turf.distance(centerPt, centroid, { units: "kilometers" });
-
-        // Robust abbr extraction with fallback
-        let abbr = (
-          feature.properties.STUSPS ||
-          feature.properties.STUSPS?.toLowerCase() ||
-          feature.properties.statefp ||
-          feature.properties.STATEFP ||
-          feature.properties.postal ||
-          feature.properties.POSTAL ||
-          feature.properties.STATE ||
-          feature.properties.state ||
-          stateNameToAbbr[(feature.properties.NAME || feature.properties.name || "").toLowerCase().trim()]
-        );
-
-        if (abbr) {
-          abbr = abbr.toLowerCase();
-          console.log("[ZIP DEBUG] State:", feature.properties.NAME || feature.properties.name || "Unnamed", "abbr:", abbr.toUpperCase(), "distance:", dist.toFixed(2), "km");
-          if (dist < minDist) {
-            minDist = dist;
-            selectedAbbr = abbr;
-            closestStateName = feature.properties.NAME || feature.properties.name || abbr.toUpperCase();
-          }
-        } else {
-          console.log("[ZIP DEBUG] No abbr found for state:", feature.properties.NAME || feature.properties.name || "Unnamed");
-        }
-      }
-    }
-
-    if (selectedAbbr) {
-      console.log("[ZIP LOAD] Selected closest state:", selectedAbbr.toUpperCase(), "name:", closestStateName, "distance:", minDist.toFixed(2), "km");
-      if (!loadedZipLayers.current[selectedAbbr]) {
-        setLoadingZips(true);
-        loadZipForStates([selectedAbbr]);
-      } else {
-        console.log("[ZIP LOAD] Already loaded:", selectedAbbr.toUpperCase());
-        setLoadingZips(false);
-      }
-    } else {
-      console.warn("[ZIP LOAD] No valid state abbr found - falling back to Kansas");
-      setLoadingZips(true);
-      loadZipForStates(["ks"]);
-    }
-  };
-
-  // Initial load and visibility toggle
-  useEffect(() => {
-    const map = mapRef.current;
-    if (!map) return;
-
-    const showZips = boundaryMode === "zips" || boundaryMode === "both";
-
-    if (!showZips) {
-      map.removeLayer(zipLayerGroupRef.current);
-      setLoadingZips(false);
-      return;
-    }
-
-    if (!map.hasLayer(zipLayerGroupRef.current)) {
-      map.addLayer(zipLayerGroupRef.current);
-    }
-
-    loadVisibleZips();
-  }, [boundaryMode]);
-
   const getZipPopupContent = (zip, population, standAloneHouses) => {
     return `
       <div class="min-w-[220px]">
@@ -498,28 +481,33 @@ export default function MapContainerComponent({
       if (loadedZipLayers.current[abbr]) continue;
 
       const stateObj = ZIP_STATE_FILES.find(s => s.abbr === abbr);
-      if (!stateObj) {
-        console.error("[ZIP LOAD] No state file mapping for abbr:", abbr);
-        continue;
-      }
+      if (!stateObj) continue;
 
-      const fileName = `${abbr}_${stateObj.name.replace(/ /g, "_")}_zip_codes_geo.min.json`;
+            const fileName = `${abbr}_${stateObj.name.replace(/ /g, "_")}_zip_codes_geo.min.json`;
       const url = `${baseUrl}${fileName}`;
 
-      console.log("[ZIP FETCH] Trying to load:", url);
+      console.log(`[ZIP FETCH] Attempting ${url}`);
 
       try {
         const res = await fetch(url);
-        if (!res.ok) {
-          console.error("[ZIP FETCH] HTTP error:", res.status, "for", url);
-          throw new Error(`HTTP ${res.status}`);
-        }
+        if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
 
         let geo = await res.json();
-        geo = turf.simplify(geo, { tolerance: 0.001, highQuality: true });
+
+                // CRITICAL: Flip all coordinates [lng, lat] → [lat, lng]
+        geo = turf.flip(geo);
+
+        // NO simplify - can break flipped coords or cause rendering issues
+        // geo = turf.simplify(geo, { tolerance: 0.001, highQuality: true });
 
         const layer = L.geoJSON(geo, {
-          style: getZipStyle,
+          style: (feature) => ({
+            color: "#ff0000",       // bright red stroke
+            weight: 3,              // thick
+            opacity: 1,
+            fillColor: "#ffff00",   // YELLOW FILL - huge visible area
+            fillOpacity: 0.45       // strong yellow tint
+          }),
           onEachFeature: (feature, layer) => {
             const zip = String(feature.properties.ZCTA5CE10 || feature.properties.ZIP || feature.properties.ZIPCODE || "");
             if (!zip) return;
@@ -543,21 +531,20 @@ export default function MapContainerComponent({
                   const optimisticStyle = willAdd
                     ? {
                         color: addTerritory.color,
-                        weight: addTerritory.id === activeTerritoryIdRef.current ? 4 : 2,
+                        weight: 5,
                         opacity: 1,
                         fillColor: addTerritory.color,
-                        fillOpacity: addTerritory.id === activeTerritoryIdRef.current ? 0.6 : 0.4,
+                        fillOpacity: 0.6,
                       }
                     : {
-                        color: "#4b5563",
-                        weight: 0.8,
-                        opacity: 0.5,
-                        fillColor: "#e2e8f0",
-                        fillOpacity: 0.15,
+                        color: "#ff0000",
+                        weight: 3,
+                        opacity: 1,
+                        fillColor: "#ffff00",
+                        fillOpacity: 0.45,
                       };
 
                   clickedLayer.setStyle(optimisticStyle);
-                  clickedLayer._preHoverStyle = optimisticStyle;
 
                   let population = 0;
                   let standAloneHouses = 0;
@@ -573,7 +560,6 @@ export default function MapContainerComponent({
                       standAloneHouses = data.standAloneHouses || 0;
                       zipDataCache.current[zip] = { population, standAloneHouses };
                     } catch (err) {
-                      console.error("[ZIP CLICK] Census fetch failed for ZIP", zip, ":", err);
                       population = 0;
                       standAloneHouses = 0;
                       zipDataCache.current[zip] = { population, standAloneHouses };
@@ -599,27 +585,17 @@ export default function MapContainerComponent({
               },
               mouseover: (e) => {
                 const layer = e.target;
-                layer._preHoverStyle = {
-                  weight: layer.options.weight,
-                  color: layer.options.color,
-                  opacity: layer.options.opacity,
-                  fillColor: layer.options.fillColor,
-                  fillOpacity: layer.options.fillOpacity,
-                };
-
                 layer.setStyle({
-                  weight: 5,
-                  color: "#ff7800",
+                  weight: 6,
+                  color: "#00ffff",
                   opacity: 1,
-                  fillOpacity: 0.7,
+                  fillOpacity: 0.6,
                 });
                 layer.bringToFront();
               },
               mouseout: (e) => {
                 const layer = e.target;
-                if (layer._preHoverStyle) {
-                  layer.setStyle(layer._preHoverStyle);
-                }
+                layer.setStyle(getZipStyle(layer.feature));
               },
             });
           },
@@ -627,9 +603,10 @@ export default function MapContainerComponent({
 
         zipLayerGroupRef.current.addLayer(layer);
         loadedZipLayers.current[abbr] = layer;
-        console.log("[ZIP LOAD] Successfully loaded:", abbr.toUpperCase());
-      } catch (err) {
-        console.error(`[ZIP] Load error for ${abbr}:`, err);
+
+                console.log(`[ZIP DEBUG] Layer added for ${abbr.toUpperCase()}`);
+            } catch (err) {
+        console.error(`[ZIP ERROR] Failed to load ${abbr}:`, err);
       }
     }
 
@@ -638,18 +615,18 @@ export default function MapContainerComponent({
 
   const getZipStyle = (feature) => {
     const zip = String(feature.properties.ZCTA5CE10 || feature.properties.ZIP || feature.properties.ZIPCODE || "");
-    let color = "#4b5563";
-    let weight = 0.8;
-    let opacity = 0.5;
-    let fillColor = "#e2e8f0";
-    let fillOpacity = 0.15;
+    let color = "#ff0000";
+    let weight = 3;
+    let opacity = 1;
+    let fillColor = "#ffff00";
+    let fillOpacity = 0.45;
 
     for (const territory of territoriesRef.current) {
       if (territory.zips?.some(z => String(z.zip) === zip)) {
         color = territory.color;
         fillColor = territory.color;
         fillOpacity = territory.id === activeTerritoryIdRef.current ? 0.6 : 0.4;
-        weight = territory.id === activeTerritoryIdRef.current ? 4 : 2;
+        weight = territory.id === activeTerritoryIdRef.current ? 5 : 3;
         opacity = 1;
         break;
       }
@@ -696,11 +673,6 @@ export default function MapContainerComponent({
   };
 
   const handleCountyClick = async (feature, layer, e) => {
-    console.log("=== COUNTY CLICK DETECTED ===");
-    console.log("Feature properties:", feature.properties);
-    console.log("Active territory ID:", activeTerritoryId);
-    console.log("Add mode territory ID:", addModeTerritoryId);
-
     const props = feature.properties || {};
     let fips = props.GEOID || (props.STATEFP + props.COUNTYFP) || props.FIPS || props.statefp + props.countyfp || props.countyfp;
 
@@ -755,7 +727,7 @@ export default function MapContainerComponent({
         maxZoom={19}
         zoomControl={true}
         scrollWheelZoom={true}
-        preferCanvas={boundaryMode !== "zips" && boundaryMode !== "both"}
+        preferCanvas={true}
         whenCreated={mapCreated}
       >
         <TileLayer
@@ -766,7 +738,6 @@ export default function MapContainerComponent({
 
         <MapInvalidator />
         <DataChangeInvalidator savedZones={territories} />
-        <MapEventHandler onMapClick={null} drawingMode={false} />
 
         <GeoJSON
           data={usStatesGeoJSON}
@@ -856,6 +827,8 @@ export default function MapContainerComponent({
             <span>Loading ZIP boundaries...</span>
           </div>
         )}
+
+        
       </LeafletMap>
     </div>
   );
