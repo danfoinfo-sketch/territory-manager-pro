@@ -2,7 +2,6 @@ import React, { useEffect, useRef, useState } from "react";
 import { MapContainer as LeafletMap, TileLayer, GeoJSON, Popup, useMap, useMapEvents } from "react-leaflet";
 import { Loader2 } from "lucide-react";
 import L from "leaflet";
-import booleanPointInPolygon from "@turf/boolean-point-in-polygon";
 import * as turf from "@turf/turf";
 import usStatesGeoJSON from "../../data/us_states.json";
 import { fetchCountyPopulation, getCountyName, fetchStandAloneHouses, fetchZipPopulationAndHouses } from "./censusApi";
@@ -245,14 +244,14 @@ export default function MapContainerComponent({
   const [loadingZips, setLoadingZips] = useState(false);
   const [popupInfo, setPopupInfo] = useState(null);
 
-  // Sync refs
+  // Sync refs with latest props
   useEffect(() => {
     addModeRef.current = addModeTerritoryId;
     territoriesRef.current = territories;
     activeTerritoryIdRef.current = activeTerritoryId;
   }, [addModeTerritoryId, territories, activeTerritoryId]);
 
-  // Re-style on territory/active changes
+  // Re-style all loaded ZIP layers when territories or active territory changes
   useEffect(() => {
     Object.values(loadedZipLayers.current).forEach(layer => {
       layer.eachLayer(subLayer => {
@@ -274,23 +273,7 @@ export default function MapContainerComponent({
     zipLayerGroupRef.current.clearLayers();
     loadedZipLayers.current = {};
 
-    const center = mapRef.current.getCenter();
-    const centerPt = turf.point([center.lng, center.lat]);
-    const visibleAbbrs = new Set();
-
-    usStatesGeoJSON.features.forEach((feature) => {
-      if (feature.geometry && booleanPointInPolygon(centerPt, feature)) {
-        let abbr =
-          feature.properties.STUSPS?.toLowerCase() ||
-          feature.properties.STATEFP ||
-          stateNameToAbbr[(feature.properties.NAME || "").toLowerCase().trim()];
-        if (abbr) visibleAbbrs.add(abbr);
-      }
-    });
-
-    const toLoad = visibleAbbrs.size === 0 ? ["tx"] : [...visibleAbbrs];
-    setLoadingZips(true);
-    loadZipForStates(toLoad);
+    loadVisibleZips();
   }, [addModeTerritoryId, boundaryMode]);
 
   const mapCreated = (map) => {
@@ -409,13 +392,71 @@ export default function MapContainerComponent({
     }
   }, [selectedLocation, countyBoundaries]);
 
+  const loadVisibleZips = () => {
+    if (!mapRef.current) return;
+
+    const center = mapRef.current.getCenter();
+    const centerPt = turf.point([center.lng, center.lat]);
+
+    console.log("[ZIP DEBUG] Map center:", center.lat.toFixed(6), center.lng.toFixed(6));
+
+    let selectedAbbr = null;
+    let minDist = Infinity;
+    let closestStateName = "None";
+
+    // Find closest state by centroid distance
+    for (const feature of usStatesGeoJSON.features) {
+      if (feature.geometry) {
+        const centroid = turf.centroid(feature);
+        const dist = turf.distance(centerPt, centroid, { units: "kilometers" });
+
+        // Robust abbr extraction with fallback
+        let abbr = (
+          feature.properties.STUSPS ||
+          feature.properties.STUSPS?.toLowerCase() ||
+          feature.properties.statefp ||
+          feature.properties.STATEFP ||
+          feature.properties.postal ||
+          feature.properties.POSTAL ||
+          feature.properties.STATE ||
+          feature.properties.state ||
+          stateNameToAbbr[(feature.properties.NAME || feature.properties.name || "").toLowerCase().trim()]
+        );
+
+        if (abbr) {
+          abbr = abbr.toLowerCase();
+          console.log("[ZIP DEBUG] State:", feature.properties.NAME || feature.properties.name || "Unnamed", "abbr:", abbr.toUpperCase(), "distance:", dist.toFixed(2), "km");
+          if (dist < minDist) {
+            minDist = dist;
+            selectedAbbr = abbr;
+            closestStateName = feature.properties.NAME || feature.properties.name || abbr.toUpperCase();
+          }
+        } else {
+          console.log("[ZIP DEBUG] No abbr found for state:", feature.properties.NAME || feature.properties.name || "Unnamed");
+        }
+      }
+    }
+
+    if (selectedAbbr) {
+      console.log("[ZIP LOAD] Selected closest state:", selectedAbbr.toUpperCase(), "name:", closestStateName, "distance:", minDist.toFixed(2), "km");
+      if (!loadedZipLayers.current[selectedAbbr]) {
+        setLoadingZips(true);
+        loadZipForStates([selectedAbbr]);
+      } else {
+        console.log("[ZIP LOAD] Already loaded:", selectedAbbr.toUpperCase());
+        setLoadingZips(false);
+      }
+    } else {
+      console.warn("[ZIP LOAD] No valid state abbr found - falling back to Kansas");
+      setLoadingZips(true);
+      loadZipForStates(["ks"]);
+    }
+  };
+
+  // Initial load and visibility toggle
   useEffect(() => {
     const map = mapRef.current;
     if (!map) return;
-
-    if (!map.hasLayer(zipLayerGroupRef.current)) {
-      zipLayerGroupRef.current.addTo(map);
-    }
 
     const showZips = boundaryMode === "zips" || boundaryMode === "both";
 
@@ -425,32 +466,11 @@ export default function MapContainerComponent({
       return;
     }
 
-    map.addLayer(zipLayerGroupRef.current);
-
-    const center = map.getCenter();
-    const centerPt = turf.point([center.lng, center.lat]);
-
-    const visibleAbbrs = new Set();
-
-    usStatesGeoJSON.features.forEach((feature) => {
-      if (feature.geometry && booleanPointInPolygon(centerPt, feature)) {
-        let abbr =
-          feature.properties.STUSPS?.toLowerCase() ||
-          feature.properties.STATEFP ||
-          stateNameToAbbr[(feature.properties.NAME || "").toLowerCase().trim()];
-
-        if (abbr) {
-          visibleAbbrs.add(abbr);
-        }
-      }
-    });
-
-    const toLoad = visibleAbbrs.size === 0 ? ["tx"] : [...visibleAbbrs].filter(abbr => !loadedZipLayers.current[abbr]);
-
-    if (toLoad.length > 0) {
-      setLoadingZips(true);
-      loadZipForStates(toLoad);
+    if (!map.hasLayer(zipLayerGroupRef.current)) {
+      map.addLayer(zipLayerGroupRef.current);
     }
+
+    loadVisibleZips();
   }, [boundaryMode]);
 
   const getZipPopupContent = (zip, population, standAloneHouses) => {
@@ -478,14 +498,22 @@ export default function MapContainerComponent({
       if (loadedZipLayers.current[abbr]) continue;
 
       const stateObj = ZIP_STATE_FILES.find(s => s.abbr === abbr);
-      if (!stateObj) continue;
+      if (!stateObj) {
+        console.error("[ZIP LOAD] No state file mapping for abbr:", abbr);
+        continue;
+      }
 
       const fileName = `${abbr}_${stateObj.name.replace(/ /g, "_")}_zip_codes_geo.min.json`;
       const url = `${baseUrl}${fileName}`;
 
+      console.log("[ZIP FETCH] Trying to load:", url);
+
       try {
         const res = await fetch(url);
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        if (!res.ok) {
+          console.error("[ZIP FETCH] HTTP error:", res.status, "for", url);
+          throw new Error(`HTTP ${res.status}`);
+        }
 
         let geo = await res.json();
         geo = turf.simplify(geo, { tolerance: 0.001, highQuality: true });
@@ -599,6 +627,7 @@ export default function MapContainerComponent({
 
         zipLayerGroupRef.current.addLayer(layer);
         loadedZipLayers.current[abbr] = layer;
+        console.log("[ZIP LOAD] Successfully loaded:", abbr.toUpperCase());
       } catch (err) {
         console.error(`[ZIP] Load error for ${abbr}:`, err);
       }
@@ -667,6 +696,11 @@ export default function MapContainerComponent({
   };
 
   const handleCountyClick = async (feature, layer, e) => {
+    console.log("=== COUNTY CLICK DETECTED ===");
+    console.log("Feature properties:", feature.properties);
+    console.log("Active territory ID:", activeTerritoryId);
+    console.log("Add mode territory ID:", addModeTerritoryId);
+
     const props = feature.properties || {};
     let fips = props.GEOID || (props.STATEFP + props.COUNTYFP) || props.FIPS || props.statefp + props.countyfp || props.countyfp;
 
