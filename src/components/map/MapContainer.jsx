@@ -256,7 +256,19 @@ export default function MapContainerComponent({
     const updateZipForCenter = () => {
     if (!mapRef.current) return;
 
-    const center = mapRef.current.getCenter();
+    const map = mapRef.current;
+    const zoom = map.getZoom();
+    const showZips = boundaryMode === "zips" || boundaryMode === "both";
+
+    if (!showZips || zoom < 8) {
+      // Clear all zip layers if not showing zips or zoomed out
+      zipLayerGroupRef.current.clearLayers();
+      loadedZipLayers.current = {};
+      setCurrentLoadedStateAbbr(null);
+      return;
+    }
+
+    const center = map.getCenter();
     const centerPt = turf.point([center.lng, center.lat]);
 
     let selectedAbbr = null;
@@ -497,8 +509,8 @@ export default function MapContainerComponent({
                 // CRITICAL: Flip all coordinates [lng, lat] → [lat, lng]
         geo = turf.flip(geo);
 
-        // NO simplify - can break flipped coords or cause rendering issues
-        // geo = turf.simplify(geo, { tolerance: 0.001, highQuality: true });
+        // Simplify to reduce lag
+        geo = turf.simplify(geo, { tolerance: 0.001, highQuality: true });
 
         const layer = L.geoJSON(geo, {
           style: (feature) => ({
@@ -781,15 +793,15 @@ export default function MapContainerComponent({
               {popupInfo.population !== null ? (
                 <div className="space-y-3">
                   <div>
-                    <p className="text-xs text-gray-600">Population (2023 est.)</p>
-                    <p className="text-xl font-bold text-indigo-700">
+                    <p class="text-xs text-gray-600">Population (2023 est.)</p>
+                    <p class="text-xl font-bold text-indigo-700">
                       {popupInfo.population.toLocaleString()}
                     </p>
                   </div>
 
                   <div>
-                    <p className="text-xs text-gray-600">Stand-alone houses</p>
-                    <p className="text-xl font-bold text-indigo-700">
+                    <p class="text-xs text-gray-600">Stand-alone houses</p>
+                    <p class="text-xl font-bold text-indigo-700">
                       {popupInfo.standAloneHouses !== undefined && popupInfo.standAloneHouses !== null
                         ? popupInfo.standAloneHouses.toLocaleString()
                         : "Loading..."}
