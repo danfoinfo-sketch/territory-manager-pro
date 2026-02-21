@@ -793,15 +793,15 @@ export default function MapContainerComponent({
               {popupInfo.population !== null ? (
                 <div className="space-y-3">
                   <div>
-                    <p class="text-xs text-gray-600">Population (2023 est.)</p>
-                    <p class="text-xl font-bold text-indigo-700">
+                    <p className="text-xs text-gray-600">Population (2023 est.)</p>
+                    <p className="text-xl font-bold text-indigo-700">
                       {popupInfo.population.toLocaleString()}
                     </p>
                   </div>
 
                   <div>
-                    <p class="text-xs text-gray-600">Stand-alone houses</p>
-                    <p class="text-xl font-bold text-indigo-700">
+                    <p className="text-xs text-gray-600">Stand-alone houses</p>
+                    <p className="text-xl font-bold text-indigo-700">
                       {popupInfo.standAloneHouses !== undefined && popupInfo.standAloneHouses !== null
                         ? popupInfo.standAloneHouses.toLocaleString()
                         : "Loading..."}
